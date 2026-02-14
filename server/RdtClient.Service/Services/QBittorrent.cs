@@ -458,14 +458,7 @@ public class QBittorrent(ILogger<QBittorrent> logger,
 
     public async Task TorrentsDelete(String hash, Boolean deleteFiles)
     {
-        if (deleteFiles)
-        {
-            logger.LogDebug("Delete {hash}, with files", hash);
-        }
-        else
-        {
-            logger.LogDebug("Delete {hash}, no files", hash);
-        }
+        logger.LogInformation("Received qB API delete for hash {hash}. deleteFiles={deleteFiles}", hash, deleteFiles);
 
         var torrent = await torrents.GetByHash(hash);
 
@@ -473,6 +466,7 @@ public class QBittorrent(ILogger<QBittorrent> logger,
         {
             if (qbittorrentFallbackClient.IsEnabledAndConfigured())
             {
+                logger.LogInformation("Torrent {hash} not found in rdt-client DB, forwarding delete to qB fallback. deleteFiles={deleteFiles}", hash, deleteFiles);
                 await qbittorrentFallbackClient.Delete(hash, deleteFiles);
             }
 
@@ -481,6 +475,7 @@ public class QBittorrent(ILogger<QBittorrent> logger,
 
         if (Torrents.IsQbittorrentFallback(torrent))
         {
+            logger.LogInformation("Deleting fallback torrent {hash} from qB fallback. deleteFiles={deleteFiles}", hash, deleteFiles);
             await qbittorrentFallbackClient.Delete(hash, deleteFiles);
             await torrents.Delete(torrent.TorrentId, true, false, false);
 

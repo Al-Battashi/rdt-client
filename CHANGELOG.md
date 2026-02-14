@@ -6,6 +6,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.126] - 2026-02-14
+### Added
+- Added qBittorrent fallback options for Real-Debrid queue behavior:
+  - Prioritize cached torrents in the provider queue.
+  - Send non-cached torrents directly to qBittorrent fallback.
+
+### Changed
+- Updated status text to clearly distinguish provider downloads from torrent-client (qBittorrent) downloads.
+- Updated qBittorrent fallback status text to show queued/preparing states instead of generic stalled messages.
+
+### Fixed
+- Improved Real-Debrid queue handling so cached torrents are processed ahead of non-cached torrents when enabled.
+- Fixed non-cached direct-to-qB routing so it is still evaluated when provider download slots are full.
+- Fixed qBittorrent fallback add requests to target the configured download path/category, improving *arr import/move behavior.
+- Fixed fallback torrent metadata normalization (`state`, `content_path`) for better Sonarr/Radarr completion detection and cleanup calls.
+
 ## [2.0.125] - 2026-02-14
 ### Fixed
 - Synced qBittorrent fallback torrent state into the rdt-client torrent view (status, progress, speed, seeders).

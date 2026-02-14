@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.IO.Abstractions.TestingHelpers;
 using System.Text;
 using System.Text.RegularExpressions;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 using Moq;
 using RdtClient.Data.Data;
@@ -17,6 +18,8 @@ internal class Mocks
 {
     public readonly Mock<IDownloads> DownloadsMock;
     public readonly Mock<IEnricher> EnricherMock;
+    public readonly Mock<IHttpClientFactory> HttpClientFactoryMock;
+    public readonly IMemoryCache MemoryCache;
     public readonly Mock<IProcessFactory> ProcessFactoryMock;
     public readonly Mock<IProcess> ProcessMock;
     public readonly Mock<ITorrentData> TorrentDataMock;
@@ -27,6 +30,9 @@ internal class Mocks
         TorrentDataMock = new();
         DownloadsMock = new();
         EnricherMock = new();
+        HttpClientFactoryMock = new();
+        HttpClientFactoryMock.Setup(m => m.CreateClient(It.IsAny<String>())).Returns(new HttpClient());
+        MemoryCache = new MemoryCache(new MemoryCacheOptions());
 
         TorrentsLoggerMock = new();
 
@@ -99,6 +105,8 @@ public class TorrentsTest
         });
 
         var torrents = new TorrentsService(mocks.TorrentsLoggerMock.Object,
+                                           mocks.HttpClientFactoryMock.Object,
+                                           mocks.MemoryCache,
                                            mocks.TorrentDataMock.Object,
                                            mocks.DownloadsMock.Object,
                                            mocks.ProcessFactoryMock.Object,
@@ -166,6 +174,8 @@ public class TorrentsTest
         });
 
         var torrents = new TorrentsService(mocks.TorrentsLoggerMock.Object,
+                                           mocks.HttpClientFactoryMock.Object,
+                                           mocks.MemoryCache,
                                            mocks.TorrentDataMock.Object,
                                            mocks.DownloadsMock.Object,
                                            mocks.ProcessFactoryMock.Object,
@@ -215,6 +225,8 @@ public class TorrentsTest
         });
 
         var torrents = new TorrentsService(mocks.TorrentsLoggerMock.Object,
+                                           mocks.HttpClientFactoryMock.Object,
+                                           mocks.MemoryCache,
                                            mocks.TorrentDataMock.Object,
                                            mocks.DownloadsMock.Object,
                                            mocks.ProcessFactoryMock.Object,
@@ -283,6 +295,8 @@ public class TorrentsTest
         });
 
         var torrents = new TorrentsService(mocks.TorrentsLoggerMock.Object,
+                                           mocks.HttpClientFactoryMock.Object,
+                                           mocks.MemoryCache,
                                            mocks.TorrentDataMock.Object,
                                            mocks.DownloadsMock.Object,
                                            mocks.ProcessFactoryMock.Object,

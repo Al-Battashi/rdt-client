@@ -334,7 +334,8 @@ public class TorrentRunner(ILogger<TorrentRunner> logger, Torrents torrents, Dow
 
         if (torrentsToAddToProvider.Count != 0)
         {
-            var downloadingTorrentsCount = allTorrents.Count(m => m.RdStatus is not (TorrentStatus.Queued or TorrentStatus.Finished or TorrentStatus.Error));
+            var downloadingTorrentsCount = allTorrents.Where(m => !Torrents.IsQbittorrentFallback(m))
+                                                     .Count(m => m.RdStatus is not (TorrentStatus.Queued or TorrentStatus.Finished or TorrentStatus.Error));
 
             var maxParallelDownloads = Settings.Get.Provider.MaxParallelDownloads;
 
@@ -343,13 +344,68 @@ public class TorrentRunner(ILogger<TorrentRunner> logger, Torrents torrents, Dow
                             maxParallelDownloads,
                             torrentsToAddToProvider.Count);
 
-            var dequeueCount = maxParallelDownloads == 0 ? torrentsToAddToProvider.Count : maxParallelDownloads - downloadingTorrentsCount;
+            var availabilityByTorrentId = new Dictionary<Guid, Boolean?>();
+            var sendNonCachedToQbittorrent = Settings.Get.Provider.Provider == Provider.RealDebrid &&
+                                             Settings.Get.Integrations.QbittorrentFallback.SendNonCachedToQbittorrent;
 
-            foreach (var torrent in torrentsToAddToProvider.Take(dequeueCount))
+            if (Settings.Get.Provider.Provider == Provider.RealDebrid &&
+                Settings.Get.Integrations.QbittorrentFallback.PrioritizeCachedTorrents)
             {
+                var withAvailability = new List<(Torrent Torrent, Boolean? IsCached)>();
+
+                foreach (var torrent in torrentsToAddToProvider)
+                {
+                    var isCached = await torrents.IsProviderInstantlyAvailable(torrent);
+                    availabilityByTorrentId[torrent.TorrentId] = isCached;
+                    withAvailability.Add((torrent, isCached));
+                }
+
+                torrentsToAddToProvider = withAvailability.OrderBy(m => m.IsCached == false ? 1 : 0)
+                                                          .ThenBy(m => m.IsCached == null ? 1 : 0)
+                                                          .ThenBy(m => m.Torrent.Priority ?? Int32.MaxValue)
+                                                          .ThenBy(m => m.Torrent.Added)
+                                                          .Select(m => m.Torrent)
+                                                          .ToList();
+            }
+
+            var remainingProviderSlots = maxParallelDownloads == 0 ? Int32.MaxValue : Math.Max(maxParallelDownloads - downloadingTorrentsCount, 0);
+
+            foreach (var torrent in torrentsToAddToProvider)
+            {
+                if (sendNonCachedToQbittorrent)
+                {
+                    if (!availabilityByTorrentId.TryGetValue(torrent.TorrentId, out var isCached))
+                    {
+                        isCached = await torrents.IsProviderInstantlyAvailable(torrent);
+                        availabilityByTorrentId[torrent.TorrentId] = isCached;
+                    }
+
+                    if (isCached == false && await torrents.TryFallbackToQbittorrentOnProviderCacheMiss(torrent))
+                    {
+                        logger.LogInformation("Routed non-cached provider torrent directly to qBittorrent fallback {torrentId}", torrent.TorrentId);
+
+                        continue;
+                    }
+                }
+
+                if (remainingProviderSlots <= 0)
+                {
+                    if (sendNonCachedToQbittorrent)
+                    {
+                        continue;
+                    }
+
+                    break;
+                }
+
                 try
                 {
                     await torrents.DequeueFromDebridQueue(torrent);
+
+                    if (remainingProviderSlots != Int32.MaxValue)
+                    {
+                        remainingProviderSlots--;
+                    }
                 }
                 catch (Exception ex)
                 {

@@ -30,7 +30,7 @@ export class TorrentStatusPipe implements PipeTransform {
 
         const speed: string | string[] = this.pipe.transform(allSpeeds, 'filesize');
 
-        return `Downloading file ${downloading.length + downloaded.length}/${
+        return `Downloading from provider ${downloading.length + downloaded.length}/${
           torrent.downloads.length
         } (${progress.toFixed(2)}% - ${speed}/s)`;
       }
@@ -57,7 +57,7 @@ export class TorrentStatusPipe implements PipeTransform {
       const queuedForDownload = torrent.downloads.filter((m) => !m.downloadStarted && !m.downloadFinished);
 
       if (queuedForDownload.length > 0) {
-        return `Queued for downloading`;
+        return `Queued for provider download`;
       }
 
       if (unpacked.length > 0) {
@@ -75,7 +75,10 @@ export class TorrentStatusPipe implements PipeTransform {
 
     switch (torrent.rdStatus) {
       case RealDebridStatus.Queued:
-        return 'Not Yet Added to Provider';
+        if (torrent.rdHost === 'qBittorrent') {
+          return 'Queued in torrent client';
+        }
+        return 'Queued to provider';
       case RealDebridStatus.Downloading:
         if (torrent.rdHost === 'qBittorrent') {
           const speed = this.pipe.transform(torrent.rdSpeed, 'filesize');
@@ -83,31 +86,49 @@ export class TorrentStatusPipe implements PipeTransform {
           const state = (torrent.rdStatusRaw ?? '').toLowerCase();
 
           if (state.includes('paused')) {
-            return `Torrent paused (${progress}%)`;
+            return `Downloading via torrent client (paused ${progress}%)`;
+          }
+
+          if (state.includes('queued')) {
+            return `Queued in torrent client (${progress}%)`;
+          }
+
+          if (state.includes('meta') || state.includes('check') || state.includes('allocat') || state.includes('mov')) {
+            return `Preparing in torrent client`;
           }
 
           if ((torrent.rdSpeed ?? 0) > 0) {
-            return `Torrent downloading (${progress}% - ${speed}/s)`;
+            return `Downloading via torrent client (${progress}% - ${speed}/s)`;
           }
 
-          return `Torrent stalled (${progress}%)`;
+          if (state.includes('stalled')) {
+            return `Downloading via torrent client (stalled ${progress}%)`;
+          }
+
+          return `Downloading via torrent client (stalled ${progress}%)`;
         }
 
         if (torrent.rdSeeders < 1) {
-          return `Torrent stalled`;
+          return `Downloading on provider (stalled)`;
         }
         const speed = this.pipe.transform(torrent.rdSpeed, 'filesize');
-        return `Torrent downloading (${torrent.rdProgress}% - ${speed}/s)`;
+        return `Downloading on provider (${torrent.rdProgress}% - ${speed}/s)`;
       case RealDebridStatus.Processing:
-        return `Torrent processing`;
+        if (torrent.rdHost === 'qBittorrent') {
+          return `Preparing in torrent client`;
+        }
+        return `Provider is processing torrent`;
       case RealDebridStatus.WaitingForFileSelection:
-        return `Torrent waiting for file selection`;
+        return `Waiting for provider file selection`;
       case RealDebridStatus.Error:
         return `Torrent error: ${torrent.rdStatusRaw}`;
       case RealDebridStatus.Finished:
-        return `Torrent finished, waiting for download links`;
+        if (torrent.rdHost === 'qBittorrent') {
+          return `Torrent client download complete`;
+        }
+        return `Provider download complete, waiting for links`;
       case RealDebridStatus.Uploading:
-        return `Torrent uploading`;
+        return `Uploading to provider`;
       default:
         return 'Unknown status';
     }

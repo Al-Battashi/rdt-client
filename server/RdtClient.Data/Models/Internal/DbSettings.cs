@@ -298,6 +298,14 @@ public class DbSettingsQbittorrentFallback
     [DisplayName("Connection timeout (seconds)")]
     [Description("Timeout in seconds for qBittorrent WebUI requests.")]
     public Int32 Timeout { get; set; } = 15;
+
+    [DisplayName("Prioritize cached torrents on provider queue")]
+    [Description("Real-Debrid only. Checks instant availability before adding queued torrents and prioritizes cached torrents so they can start downloading sooner.")]
+    public Boolean PrioritizeCachedTorrents { get; set; } = true;
+
+    [DisplayName("Send non-cached torrents to qBittorrent")]
+    [Description("Real-Debrid only. When selected, torrents that are not instantly available on the provider are sent directly to qBittorrent fallback instead of waiting for provider torrenting.")]
+    public Boolean SendNonCachedToQbittorrent { get; set; } = false;
 }
 
 public class DbSettingsDefaultsWithCategory : DbSettingsDefaults

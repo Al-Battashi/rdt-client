@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.IO;
 using System.Net;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
@@ -72,7 +73,11 @@ public class QbittorrentFallbackClient(ILogger<QbittorrentFallbackClient> logger
         return version;
     }
 
-    public async Task AddMagnet(String magnetLink, String? category, Int32? priority, CancellationToken cancellationToken = default)
+    public async Task AddMagnet(String magnetLink,
+                                String? category,
+                                Int32? priority,
+                                String? savePath = null,
+                                CancellationToken cancellationToken = default)
     {
         using var client = await CreateAuthenticatedClient(cancellationToken);
 
@@ -91,6 +96,12 @@ public class QbittorrentFallbackClient(ILogger<QbittorrentFallbackClient> logger
             formData.Add(new("priority", priority.Value.ToString(CultureInfo.InvariantCulture)));
         }
 
+        if (!String.IsNullOrWhiteSpace(savePath))
+        {
+            formData.Add(new("savepath", savePath));
+            formData.Add(new("autoTMM", "false"));
+        }
+
         using var request = new FormUrlEncodedContent(formData);
         var response = await client.PostAsync("api/v2/torrents/add", request, cancellationToken);
         await EnsureSuccess(response, "api/v2/torrents/add", cancellationToken);
@@ -103,7 +114,11 @@ public class QbittorrentFallbackClient(ILogger<QbittorrentFallbackClient> logger
         }
     }
 
-    public async Task AddFile(Byte[] fileBytes, String? category, Int32? priority, CancellationToken cancellationToken = default)
+    public async Task AddFile(Byte[] fileBytes,
+                              String? category,
+                              Int32? priority,
+                              String? savePath = null,
+                              CancellationToken cancellationToken = default)
     {
         using var client = await CreateAuthenticatedClient(cancellationToken);
         using var formData = new MultipartFormDataContent();
@@ -119,6 +134,12 @@ public class QbittorrentFallbackClient(ILogger<QbittorrentFallbackClient> logger
         if (priority.HasValue)
         {
             formData.Add(new StringContent(priority.Value.ToString(CultureInfo.InvariantCulture)), "priority");
+        }
+
+        if (!String.IsNullOrWhiteSpace(savePath))
+        {
+            formData.Add(new StringContent(savePath), "savepath");
+            formData.Add(new StringContent("false"), "autoTMM");
         }
 
         var response = await client.PostAsync("api/v2/torrents/add", formData, cancellationToken);
@@ -257,6 +278,8 @@ public class QbittorrentFallbackClient(ILogger<QbittorrentFallbackClient> logger
     public async Task Delete(String hash, Boolean deleteFiles, CancellationToken cancellationToken = default)
     {
         using var client = await CreateAuthenticatedClient(cancellationToken);
+
+        logger.LogInformation("Deleting torrent from qBittorrent fallback. hash={hash}, deleteFiles={deleteFiles}", hash, deleteFiles);
 
         await SendForm(client,
                        "api/v2/torrents/delete",
@@ -461,6 +484,16 @@ public class QbittorrentFallbackClient(ILogger<QbittorrentFallbackClient> logger
                 continue;
             }
 
+            // Some qBittorrent versions return an empty content_path; build a stable fallback for *arr imports.
+            if (String.IsNullOrWhiteSpace(torrentInfo.ContentPath) &&
+                !String.IsNullOrWhiteSpace(torrentInfo.SavePath) &&
+                !String.IsNullOrWhiteSpace(torrentInfo.Name))
+            {
+                torrentInfo.ContentPath = Path.Combine(torrentInfo.SavePath, torrentInfo.Name);
+            }
+
+            torrentInfo.State = NormalizeState(torrentInfo.State, torrentInfo.Progress);
+
             results.Add(torrentInfo);
         }
 
@@ -561,6 +594,34 @@ public class QbittorrentFallbackClient(ILogger<QbittorrentFallbackClient> logger
         property = default;
 
         return false;
+    }
+
+    private static String NormalizeState(String? state, Single progress)
+    {
+        var normalized = state?.Trim();
+        var lower = normalized?.ToLowerInvariant() ?? "";
+
+        if (progress >= 0.999f)
+        {
+            if (String.IsNullOrWhiteSpace(normalized))
+            {
+                return "pausedUP";
+            }
+
+            if (lower.Contains("up") || lower.Contains("seed"))
+            {
+                return normalized!;
+            }
+
+            return "pausedUP";
+        }
+
+        if (String.IsNullOrWhiteSpace(normalized))
+        {
+            return "downloading";
+        }
+
+        return normalized!;
     }
 
     private Boolean TryGetConfiguration(out QbittorrentFallbackConfiguration settings, out String? validationError)
