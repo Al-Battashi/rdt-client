@@ -548,6 +548,12 @@ public class TorrentRunner(
         {
             try
             {
+                if (Torrents.IsQbittorrentFallback(torrent))
+                {
+                    // External qBittorrent handles transfer lifecycle for fallback torrents.
+                    continue;
+                }
+
                 // Check if there are any downloads that are queued and can be started.
                 var queuedDownloads = torrent.Downloads
                                              .Where(m => m.Completed == null

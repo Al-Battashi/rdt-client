@@ -104,6 +104,22 @@ export function getTorrentStatus(torrent: Torrent): string {
     case RealDebridStatus.Queued:
       return 'Not Yet Added to Provider';
     case RealDebridStatus.Downloading:
+      if (torrent.rdHost === 'qBittorrent') {
+        const speed = fileSizePipe.transform(torrent.rdSpeed, 'filesize') as string;
+        const progress = torrent.rdProgress ?? 0;
+        const state = (torrent.rdStatusRaw ?? '').toLowerCase();
+
+        if (state.includes('paused')) {
+          return `Torrent paused (${progress}%)`;
+        }
+
+        if ((torrent.rdSpeed ?? 0) > 0) {
+          return `Torrent downloading (${progress}% - ${speed}/s)`;
+        }
+
+        return `Torrent stalled (${progress}%)`;
+      }
+
       if (torrent.rdSeeders < 1 && torrent.type !== 1) {
         return 'Torrent stalled';
       }
