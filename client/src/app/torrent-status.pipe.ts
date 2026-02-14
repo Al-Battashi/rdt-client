@@ -77,6 +77,22 @@ export class TorrentStatusPipe implements PipeTransform {
       case RealDebridStatus.Queued:
         return 'Not Yet Added to Provider';
       case RealDebridStatus.Downloading:
+        if (torrent.rdHost === 'qBittorrent') {
+          const speed = this.pipe.transform(torrent.rdSpeed, 'filesize');
+          const progress = torrent.rdProgress ?? 0;
+          const state = (torrent.rdStatusRaw ?? '').toLowerCase();
+
+          if (state.includes('paused')) {
+            return `Torrent paused (${progress}%)`;
+          }
+
+          if ((torrent.rdSpeed ?? 0) > 0) {
+            return `Torrent downloading (${progress}% - ${speed}/s)`;
+          }
+
+          return `Torrent stalled (${progress}%)`;
+        }
+
         if (torrent.rdSeeders < 1) {
           return `Torrent stalled`;
         }

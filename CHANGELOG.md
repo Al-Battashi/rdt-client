@@ -6,6 +6,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.125] - 2026-02-14
+### Fixed
+- Synced qBittorrent fallback torrent state into the rdt-client torrent view (status, progress, speed, seeders).
+- Prevented fallback torrents from being processed by the debrid download pipeline.
+- Fixed fallback torrent deletion from the rdt-client UI so provider/local file delete actions are forwarded to qBittorrent.
+- Removed stale fallback torrents from rdt-client when they no longer exist in qBittorrent.
+- Updated fallback status text in the UI to avoid false "stalled" states for active qBittorrent downloads.
+
 ## [2.0.124] - 2026-02-14
 ### Added
 - Added a Settings button to test qBittorrent fallback connection and return detected qBittorrent version.
