@@ -459,7 +459,7 @@ public class QbittorrentFallbackClient(ILogger<QbittorrentFallbackClient> logger
                 NumLeechs = ReadInt64(item, "num_leechs"),
                 NumSeeds = ReadInt64(item, "num_seeds"),
                 Priority = ReadInt64(item, "priority"),
-                Progress = ReadSingle(item, "progress") ?? 0,
+                Progress = NormalizeProgress(ReadSingle(item, "progress") ?? 0),
                 Ratio = ReadInt64(item, "ratio"),
                 RatioLimit = ReadInt64(item, "ratio_limit"),
                 SavePath = ReadString(item, "save_path"),
@@ -622,6 +622,16 @@ public class QbittorrentFallbackClient(ILogger<QbittorrentFallbackClient> logger
         }
 
         return normalized!;
+    }
+
+    private static Single NormalizeProgress(Single progress)
+    {
+        if (Single.IsNaN(progress) || Single.IsInfinity(progress))
+        {
+            return 0;
+        }
+
+        return Math.Clamp(progress, 0f, 1f);
     }
 
     private Boolean TryGetConfiguration(out QbittorrentFallbackConfiguration settings, out String? validationError)

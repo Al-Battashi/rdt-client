@@ -6,6 +6,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.127] - 2026-02-14
+### Fixed
+- Fixed qB-compatible API serialization crashes caused by non-finite torrent progress values (`NaN`/`Infinity`).
+- Hardened fallback qB torrent progress normalization to always keep progress within valid JSON-safe bounds.
+
 ## [2.0.126] - 2026-02-14
 ### Added
 - Added qBittorrent fallback options for Real-Debrid queue behavior:

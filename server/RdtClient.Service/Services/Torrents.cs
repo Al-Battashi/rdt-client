@@ -1257,7 +1257,10 @@ public class Torrents(
             changed = true;
         }
 
-        var progress = (Int64)Math.Clamp(Math.Round(qbtTorrent.Progress * 100), 0, 100);
+        var safeProgress = Single.IsNaN(qbtTorrent.Progress) || Single.IsInfinity(qbtTorrent.Progress)
+            ? 0
+            : qbtTorrent.Progress;
+        var progress = (Int64)Math.Clamp(Math.Round(safeProgress * 100), 0, 100);
 
         if (torrent.RdProgress != progress)
         {
