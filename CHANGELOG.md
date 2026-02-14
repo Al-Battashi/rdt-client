@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.122] - 2026-02-14
+### Fixed
+- Fixed startup/runtime failures on SQLite where ordering torrents by `DateTimeOffset` (`Added`) could not be translated by EF Core SQLite.
+
 ## [2.0.121] - 2026-02-14
 ### Added
 - Added optional qBittorrent WebUI fallback for *arr/qB integrations when Real-Debrid rejects provider add requests (for example, infringing file responses), while keeping the same rdt-client API surface.

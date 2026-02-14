@@ -12,11 +12,13 @@ public class TorrentData(DataContext dataContext) : ITorrentData
                                         .AsNoTracking()
                                         .AsSplitQuery()
                                         .Include(m => m.Downloads)
-                                        .OrderBy(m => m.Priority ?? 9999)
-                                        .ThenBy(m => m.Added)
                                         .ToListAsync();
 
-        return torrents;
+        // SQLite does not support ORDER BY for DateTimeOffset expressions in EF translation.
+        // Apply ordering in-memory to keep deterministic processing order.
+        return torrents.OrderBy(m => m.Priority ?? 9999)
+                       .ThenBy(m => m.Added)
+                       .ToList();
     }
 
     public async Task<Torrent?> GetById(Guid torrentId)
