@@ -11,14 +11,20 @@ public class QbittorrentFallbackClient(ILogger<QbittorrentFallbackClient> logger
 {
     public const String FallbackStatusRaw = "qbittorrent_fallback";
     private const String FallbackIdPrefix = "qbt:";
+    private String? _lastValidationError;
 
     public Boolean IsEnabledAndConfigured()
     {
         var result = TryGetConfiguration(out _, out var validationError);
 
-        if (!result && validationError != null)
+        if (result)
         {
-            logger.LogDebug("qBittorrent fallback not ready: {validationError}", validationError);
+            _lastValidationError = null;
+        }
+        else if (validationError != null && !String.Equals(_lastValidationError, validationError, StringComparison.Ordinal))
+        {
+            logger.LogWarning("qBittorrent fallback not ready: {validationError}", validationError);
+            _lastValidationError = validationError;
         }
 
         return result;
@@ -518,7 +524,7 @@ public class QbittorrentFallbackClient(ILogger<QbittorrentFallbackClient> logger
             return false;
         }
 
-        if (!Uri.TryCreate(fallback.Url, UriKind.Absolute, out var baseUri) || (baseUri.Scheme != Uri.UriSchemeHttp && baseUri.Scheme != Uri.UriSchemeHttps))
+        if (!TryBuildBaseUri(fallback.Url, out var baseUri))
         {
             validationError = "qBittorrent fallback URL is invalid.";
 
@@ -533,6 +539,44 @@ public class QbittorrentFallbackClient(ILogger<QbittorrentFallbackClient> logger
         }
 
         settings = new(baseUri, fallback.Username.Trim(), fallback.Password, fallback.IgnoreTlsErrors, fallback.Timeout);
+
+        return true;
+    }
+
+    private static Boolean TryBuildBaseUri(String rawUrl, out Uri baseUri)
+    {
+        baseUri = default!;
+
+        var normalizedUrl = rawUrl.Trim();
+
+        if (String.IsNullOrWhiteSpace(normalizedUrl))
+        {
+            return false;
+        }
+
+        if (!normalizedUrl.Contains("://", StringComparison.Ordinal))
+        {
+            normalizedUrl = $"http://{normalizedUrl}";
+        }
+
+        if (!Uri.TryCreate(normalizedUrl, UriKind.Absolute, out var parsedUri))
+        {
+            return false;
+        }
+
+        if (parsedUri.Scheme != Uri.UriSchemeHttp && parsedUri.Scheme != Uri.UriSchemeHttps)
+        {
+            return false;
+        }
+
+        var absoluteUri = parsedUri.AbsoluteUri;
+
+        if (!absoluteUri.EndsWith('/'))
+        {
+            absoluteUri += "/";
+        }
+
+        baseUri = new(absoluteUri, UriKind.Absolute);
 
         return true;
     }

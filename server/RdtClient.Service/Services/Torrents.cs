@@ -334,14 +334,14 @@ public class Torrents(
 
         if (!qbittorrentFallbackClient.IsEnabledAndConfigured())
         {
-            Log("qBittorrent fallback is enabled for this error, but fallback client is not configured", torrent);
+            logger.LogWarning("qBittorrent fallback was not attempted because the fallback client is not configured {torrentInfo}", torrent.ToLog());
 
             return false;
         }
 
         if (String.IsNullOrWhiteSpace(torrent.FileOrMagnet))
         {
-            Log("Cannot use qBittorrent fallback: torrent file/magnet payload is missing", torrent);
+            logger.LogWarning("Cannot use qBittorrent fallback because the torrent payload is missing {torrentInfo}", torrent.ToLog());
 
             return false;
         }
@@ -1034,12 +1034,20 @@ public class Torrents(
             return false;
         }
 
-        if (exception is RDNET.RealDebridException realDebridException && realDebridException.ErrorCode == 35)
+        for (var currentException = exception; currentException != null; currentException = currentException.InnerException)
         {
-            return true;
+            if (currentException is RDNET.RealDebridException realDebridException && realDebridException.ErrorCode == 35)
+            {
+                return true;
+            }
+
+            if (currentException.Message.Contains("Infringing file", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
         }
 
-        return exception.Message.Contains("Infringing file", StringComparison.OrdinalIgnoreCase);
+        return false;
     }
 
     private void Log(String message, Download? download, Torrent? torrent)

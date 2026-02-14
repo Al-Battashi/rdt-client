@@ -6,6 +6,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.123] - 2026-02-14
+### Fixed
+- Improved qBittorrent fallback reliability for Real-Debrid "Infringing file" errors by inspecting nested exceptions.
+- Improved qBittorrent fallback URL handling to accept URLs without a scheme (for example, `localhost:8080`).
+- Added clearer warning logs when qBittorrent fallback is enabled but not fully configured.
+
 ## [2.0.122] - 2026-02-14
 ### Fixed
 - Fixed startup/runtime failures on SQLite where ordering torrents by `DateTimeOffset` (`Added`) could not be translated by EF Core SQLite.
