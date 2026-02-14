@@ -108,6 +108,7 @@ public class TorrentsTest
                                            null!,
                                            null!,
                                            null!,
+                                           null!,
                                            null!);
 
         mocks.ProcessMock.Setup(p => p.WaitForExit(It.IsAny<Int32>())).Returns(true);
@@ -174,6 +175,7 @@ public class TorrentsTest
                                            null!,
                                            null!,
                                            null!,
+                                           null!,
                                            null!);
 
         //Act
@@ -219,6 +221,7 @@ public class TorrentsTest
                                            fileSystemMock,
                                            mocks.EnricherMock.Object,
                                            null!, // Torrent Clients are not used by `RunTorrentComplete`, this is fine
+                                           null!,
                                            null!,
                                            null!,
                                            null!,
@@ -286,6 +289,7 @@ public class TorrentsTest
                                            fileSystemMock,
                                            mocks.EnricherMock.Object,
                                            null!, // Torrent Clients are not used by `RunTorrentComplete`, this is fine
+                                           null!,
                                            null!,
                                            null!,
                                            null!,

@@ -29,7 +29,8 @@ public class Torrents(
     PremiumizeTorrentClient premiumizeTorrentClient,
     RealDebridTorrentClient realDebridTorrentClient,
     DebridLinkClient debridLinkClient,
-    TorBoxTorrentClient torBoxTorrentClient)
+    TorBoxTorrentClient torBoxTorrentClient,
+    QbittorrentFallbackClient qbittorrentFallbackClient)
 {
     private static readonly SemaphoreSlim RealDebridUpdateLock = new(1, 1);
 
@@ -86,7 +87,7 @@ public class Torrents(
     {
         var torrent = await torrentData.GetByHash(hash);
 
-        if (torrent != null)
+        if (torrent != null && !IsQbittorrentFallback(torrent))
         {
             await UpdateTorrentClientData(torrent);
         }
@@ -106,6 +107,11 @@ public class Torrents(
         Log($"Update category to {category}", torrent);
 
         await torrentData.UpdateCategory(torrent.TorrentId, category);
+    }
+
+    public static Boolean IsQbittorrentFallback(Torrent torrent)
+    {
+        return QbittorrentFallbackClient.IsFallbackTorrent(torrent);
     }
 
     public async Task<Torrent> AddMagnetToDebridQueue(String magnetLink, Torrent torrent)
@@ -316,6 +322,66 @@ public class Torrents(
         finally
         {
             RealDebridUpdateLock.Release();
+        }
+    }
+
+    public async Task<Boolean> TryFallbackToQbittorrent(Torrent torrent, Exception exception)
+    {
+        if (!ShouldFallbackToQbittorrent(exception))
+        {
+            return false;
+        }
+
+        if (!qbittorrentFallbackClient.IsEnabledAndConfigured())
+        {
+            Log("qBittorrent fallback is enabled for this error, but fallback client is not configured", torrent);
+
+            return false;
+        }
+
+        if (String.IsNullOrWhiteSpace(torrent.FileOrMagnet))
+        {
+            Log("Cannot use qBittorrent fallback: torrent file/magnet payload is missing", torrent);
+
+            return false;
+        }
+
+        try
+        {
+            if (torrent.IsFile)
+            {
+                var fileBytes = Convert.FromBase64String(torrent.FileOrMagnet);
+                await qbittorrentFallbackClient.AddFile(fileBytes, torrent.Category, torrent.Priority);
+            }
+            else
+            {
+                await qbittorrentFallbackClient.AddMagnet(torrent.FileOrMagnet, torrent.Category, torrent.Priority);
+            }
+
+            torrent.RdId = QbittorrentFallbackClient.ToFallbackId(torrent.Hash);
+            torrent.RdStatus = TorrentStatus.Downloading;
+            torrent.RdStatusRaw = QbittorrentFallbackClient.FallbackStatusRaw;
+            torrent.RdHost = "qBittorrent";
+            torrent.RdAdded = DateTimeOffset.UtcNow;
+            torrent.RdEnded = null;
+            torrent.RdProgress = 0;
+            torrent.RdSpeed = 0;
+            torrent.RdSeeders = 0;
+
+            await torrentData.UpdateRdId(torrent, torrent.RdId);
+            await torrentData.UpdateRdData(torrent);
+            await torrentData.UpdateComplete(torrent.TorrentId, null, null, false);
+            await torrentData.UpdateRetry(torrent.TorrentId, null, 0);
+
+            Log("Fell back to external qBittorrent successfully", torrent);
+
+            return true;
+        }
+        catch (Exception fallbackException)
+        {
+            logger.LogWarning(fallbackException, "qBittorrent fallback failed {torrentInfo}", torrent.ToLog());
+
+            return false;
         }
     }
 
@@ -557,6 +623,7 @@ public class Torrents(
         await RealDebridUpdateLock.WaitAsync();
 
         var torrents = await Get();
+        var providerManagedTorrents = torrents.Where(t => !IsQbittorrentFallback(t)).ToList();
 
         try
         {
@@ -564,7 +631,7 @@ public class Torrents(
 
             foreach (var rdTorrent in rdTorrents)
             {
-                var torrent = torrents.FirstOrDefault(m => m.RdId == rdTorrent.Id);
+                var torrent = providerManagedTorrents.FirstOrDefault(m => m.RdId == rdTorrent.Id);
 
                 // Auto import torrents only torrents that have their files selected
                 if (torrent == null && Settings.Get.Provider.AutoImport)
@@ -604,7 +671,7 @@ public class Torrents(
                 }
             }
 
-            foreach (var torrent in torrents)
+            foreach (var torrent in providerManagedTorrents)
             {
                 var rdTorrent = rdTorrents.FirstOrDefault(m => m.Id == torrent.RdId);
 
@@ -773,7 +840,10 @@ public class Torrents(
             return null;
         }
 
-        await UpdateTorrentClientData(torrent);
+        if (!IsQbittorrentFallback(torrent))
+        {
+            await UpdateTorrentClientData(torrent);
+        }
 
         foreach (var download in torrent.Downloads)
         {
@@ -933,6 +1003,11 @@ public class Torrents(
 
     private async Task UpdateTorrentClientData(Torrent torrent, TorrentClientTorrent? torrentClientTorrent = null)
     {
+        if (IsQbittorrentFallback(torrent))
+        {
+            return;
+        }
+
         try
         {
             var originalTorrent = JsonSerializer.Serialize(torrent, JsonSerializerOptions);
@@ -950,6 +1025,21 @@ public class Torrents(
         {
             // ignored
         }
+    }
+
+    private static Boolean ShouldFallbackToQbittorrent(Exception exception)
+    {
+        if (Settings.Get.Provider.Provider != Provider.RealDebrid)
+        {
+            return false;
+        }
+
+        if (exception is RDNET.RealDebridException realDebridException && realDebridException.ErrorCode == 35)
+        {
+            return true;
+        }
+
+        return exception.Message.Contains("Infringing file", StringComparison.OrdinalIgnoreCase);
     }
 
     private void Log(String message, Download? download, Torrent? torrent)

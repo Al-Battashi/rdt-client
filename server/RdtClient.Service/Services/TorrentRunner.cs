@@ -353,6 +353,13 @@ public class TorrentRunner(ILogger<TorrentRunner> logger, Torrents torrents, Dow
                 }
                 catch (Exception ex)
                 {
+                    if (await torrents.TryFallbackToQbittorrent(torrent, ex))
+                    {
+                        logger.LogWarning(ex, "Provider add failed, sent torrent {torrentId} to qBittorrent fallback", torrent.TorrentId);
+
+                        continue;
+                    }
+
                     await torrents.UpdateComplete(torrent.TorrentId, $"Could not add to provider: {ex.Message}", DateTimeOffset.Now, true);
                     logger.LogWarning(ex, "Could not dequeue torrent {torrentId}", torrent.TorrentId);
                 }

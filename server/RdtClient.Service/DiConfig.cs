@@ -40,6 +40,7 @@ public static class DiConfig
         services.AddScoped<Torrents>();
         services.AddScoped<TorrentRunner>();
         services.AddScoped<DebridLinkClient>();
+        services.AddSingleton<QbittorrentFallbackClient>();
 
         services.AddSingleton<IDownloadableFileFilter, DownloadableFileFilter>();
         services.AddSingleton<ITrackerListGrabber, TrackerListGrabber>();

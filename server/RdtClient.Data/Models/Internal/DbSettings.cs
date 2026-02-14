@@ -240,6 +240,10 @@ or
 public class DbSettingsIntegrations
 {
     public DbSettingsDefaultsWithCategory Default { get; set; } = new();
+
+    [DisplayName("qBittorrent fallback")]
+    [Description("When enabled, torrents that cannot be added to the debrid provider can be automatically sent to a real qBittorrent WebUI.")]
+    public DbSettingsQbittorrentFallback QbittorrentFallback { get; set; } = new();
 }
 
 public class DbSettingsGui
@@ -267,6 +271,33 @@ public class DbSettingsWatch
 
     [DisplayName("Import Defaults")]
     public DbSettingsDefaultsWithCategory Default { get; set; } = new();
+}
+
+public class DbSettingsQbittorrentFallback
+{
+    [DisplayName("Enable qBittorrent fallback")]
+    [Description("When selected, rdt-client can send a torrent to the configured qBittorrent WebUI when provider add fails (for example, infringing files on Real-Debrid).")]
+    public Boolean Enabled { get; set; } = false;
+
+    [DisplayName("qBittorrent URL")]
+    [Description("Base URL for your qBittorrent WebUI, for example http://192.168.1.10:8080.")]
+    public String? Url { get; set; } = null;
+
+    [DisplayName("qBittorrent username")]
+    [Description("Username for the qBittorrent WebUI.")]
+    public String? Username { get; set; } = null;
+
+    [DisplayName("qBittorrent password")]
+    [Description("Password for the qBittorrent WebUI.")]
+    public String? Password { get; set; } = null;
+
+    [DisplayName("Ignore TLS certificate errors")]
+    [Description("Only use this with self-signed certificates on trusted networks.")]
+    public Boolean IgnoreTlsErrors { get; set; } = false;
+
+    [DisplayName("Connection timeout (seconds)")]
+    [Description("Timeout in seconds for qBittorrent WebUI requests.")]
+    public Int32 Timeout { get; set; } = 15;
 }
 
 public class DbSettingsDefaultsWithCategory : DbSettingsDefaults

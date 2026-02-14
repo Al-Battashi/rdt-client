@@ -5,7 +5,12 @@ using RdtClient.Data.Models.QBittorrent;
 
 namespace RdtClient.Service.Services;
 
-public class QBittorrent(ILogger<QBittorrent> logger, Settings settings, Authentication authentication, Torrents torrents, Downloads downloads)
+public class QBittorrent(ILogger<QBittorrent> logger,
+                         Settings settings,
+                         Authentication authentication,
+                         Torrents torrents,
+                         Downloads downloads,
+                         QbittorrentFallbackClient qbittorrentFallbackClient)
 {
     public async Task<Boolean> AuthLogin(String userName, String password)
     {
@@ -187,144 +192,182 @@ public class QBittorrent(ILogger<QBittorrent> logger, Settings settings, Authent
     public async Task<IList<TorrentInfo>> TorrentInfo()
     {
         var savePath = Settings.AppDefaultSavePath;
-
         var results = new List<TorrentInfo>();
-
         var allTorrents = await torrents.Get();
+        var fallbackTorrents = allTorrents.Where(Torrents.IsQbittorrentFallback).ToList();
+
+        var fallbackByHash = new Dictionary<String, TorrentInfo>(StringComparer.OrdinalIgnoreCase);
+
+        if (fallbackTorrents.Count > 0 && qbittorrentFallbackClient.IsEnabledAndConfigured())
+        {
+            try
+            {
+                var fallbackInfos = await qbittorrentFallbackClient.GetTorrents();
+
+                fallbackByHash = fallbackInfos
+                                 .Where(m => !String.IsNullOrWhiteSpace(m.Hash))
+                                 .ToDictionary(m => m.Hash, m => m, StringComparer.OrdinalIgnoreCase);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Unable to fetch qBittorrent fallback torrent list");
+            }
+        }
 
         var prio = 0;
 
         foreach (var torrent in allTorrents)
         {
-            var downloadPath = savePath;
-
-            if (!String.IsNullOrWhiteSpace(torrent.Category))
+            if (Torrents.IsQbittorrentFallback(torrent) && fallbackByHash.TryGetValue(torrent.Hash, out var fallbackInfo))
             {
-                downloadPath = Path.Combine(downloadPath, torrent.Category);
+                fallbackInfo.Category = torrent.Category ?? fallbackInfo.Category;
+                fallbackInfo.Priority ??= ++prio;
+                results.Add(fallbackInfo);
+
+                continue;
             }
 
-            var torrentPath = downloadPath;
-
-            if (!String.IsNullOrWhiteSpace(torrent.RdName))
-            {
-                // Alldebrid stores single file torrents at the root folder.
-                if (torrent.ClientKind == Provider.AllDebrid && torrent.Files.Count == 1)
-                {
-                    torrentPath = Path.Combine(downloadPath, torrent.Files[0].Path);
-                }
-                else
-                {
-                    torrentPath = Path.Combine(downloadPath, torrent.RdName) + Path.DirectorySeparatorChar;
-                }
-            }
-
-            var rdProgress = Math.Clamp(torrent.RdProgress ?? 0.0, 0.0, 100.0) / 100.0;
-            var bytesTotal = torrent.RdSize ?? 0;
-            var speed = torrent.RdSpeed ?? 0;
-            var bytesDone = (Int64)(bytesTotal * rdProgress);
-
-            Double downloadProgress = 0;
-
-            if (torrent.Downloads is { Count: > 0 })
-            {
-                var dlBytesDone = torrent.Downloads.Sum(m => m.BytesDone);
-                var dlBytesTotal = torrent.Downloads.Sum(m => m.BytesTotal);
-                speed = (Int32)torrent.Downloads.Average(m => m.Speed);
-                downloadProgress = bytesTotal > 0 ? Math.Clamp((Double)dlBytesDone / dlBytesTotal, 0.0, 1.0) : 0;
-            }
-
-            var progress = (rdProgress + downloadProgress) / 2.0;
-            var remaining = TimeSpan.Zero;
-            var bytesRemaining = bytesTotal - bytesDone;
-
-            if (speed > 0 && bytesRemaining > 0)
-            {
-                remaining = TimeSpan.FromSeconds(bytesRemaining / (Double)speed);
-
-                // In case there is clock skew
-                if (remaining < TimeSpan.Zero)
-                {
-                    remaining = TimeSpan.Zero;
-                }
-            }
-
-            var result = new TorrentInfo
-            {
-                AddedOn = torrent.Added.ToUnixTimeSeconds(),
-                AmountLeft = bytesTotal - bytesDone,
-                AutoTmm = false,
-                Availability = 2,
-                Category = torrent.Category ?? "",
-                Completed = bytesDone,
-                CompletionOn = torrent.Completed?.ToUnixTimeSeconds(),
-                ContentPath = torrentPath,
-                DlLimit = -1,
-                Dlspeed = speed,
-                Downloaded = bytesDone,
-                DownloadedSession = bytesDone,
-                Eta = (Int64)remaining.TotalSeconds,
-                FlPiecePrio = false,
-                ForceStart = false,
-                Hash = torrent.Hash,
-                LastActivity = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
-                MagnetUri = "",
-                MaxRatio = -1,
-                MaxSeedingTime = -1,
-                Name = torrent.RdName,
-                NumComplete = 10,
-                NumIncomplete = 0,
-                NumLeechs = 1,
-                NumSeeds = torrent.RdSeeders ?? 1,
-                Priority = ++prio,
-                Progress = (Single)progress,
-                Ratio = 1,
-                RatioLimit = 1,
-                SavePath = downloadPath,
-                SeedingTimeLimit = 1,
-                SeenComplete = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
-                SeqDl = false,
-                Size = bytesTotal,
-                State = "downloading",
-                SuperSeeding = false,
-                Tags = "",
-                TimeActive = (Int64)(DateTimeOffset.UtcNow - torrent.Added).TotalSeconds,
-                TotalSize = bytesTotal,
-                Tracker = "udp://tracker.opentrackr.org:1337",
-                UpLimit = -1,
-                Uploaded = bytesDone,
-                UploadedSession = bytesDone,
-                Upspeed = speed
-            };
-
-            if (!String.IsNullOrWhiteSpace(torrent.Error))
-            {
-                result.State = "error";
-            }
-            else if (torrent.Completed.HasValue)
-            {
-                result.State = "pausedUP";
-            }
-            else if (torrent.RdStatus == TorrentStatus.Downloading && torrent.RdSeeders < 1)
-            {
-                result.State = "stalledDL";
-            }
-
-            results.Add(result);
+            results.Add(MapInternalTorrentInfo(torrent, savePath, ++prio));
         }
 
         return results;
     }
 
+    private static TorrentInfo MapInternalTorrentInfo(Torrent torrent, String savePath, Int32 prio)
+    {
+        var downloadPath = savePath;
+
+        if (!String.IsNullOrWhiteSpace(torrent.Category))
+        {
+            downloadPath = Path.Combine(downloadPath, torrent.Category);
+        }
+
+        var torrentPath = downloadPath;
+
+        if (!String.IsNullOrWhiteSpace(torrent.RdName))
+        {
+            // Alldebrid stores single file torrents at the root folder.
+            if (torrent.ClientKind == Provider.AllDebrid && torrent.Files.Count == 1)
+            {
+                torrentPath = Path.Combine(downloadPath, torrent.Files[0].Path);
+            }
+            else
+            {
+                torrentPath = Path.Combine(downloadPath, torrent.RdName) + Path.DirectorySeparatorChar;
+            }
+        }
+
+        var rdProgress = Math.Clamp(torrent.RdProgress ?? 0.0, 0.0, 100.0) / 100.0;
+        var bytesTotal = torrent.RdSize ?? 0;
+        var speed = torrent.RdSpeed ?? 0;
+        var bytesDone = (Int64)(bytesTotal * rdProgress);
+
+        Double downloadProgress = 0;
+
+        if (torrent.Downloads is { Count: > 0 })
+        {
+            var dlBytesDone = torrent.Downloads.Sum(m => m.BytesDone);
+            var dlBytesTotal = torrent.Downloads.Sum(m => m.BytesTotal);
+            speed = (Int32)torrent.Downloads.Average(m => m.Speed);
+            downloadProgress = bytesTotal > 0 ? Math.Clamp((Double)dlBytesDone / dlBytesTotal, 0.0, 1.0) : 0;
+        }
+
+        var progress = (rdProgress + downloadProgress) / 2.0;
+        var remaining = TimeSpan.Zero;
+        var bytesRemaining = bytesTotal - bytesDone;
+
+        if (speed > 0 && bytesRemaining > 0)
+        {
+            remaining = TimeSpan.FromSeconds(bytesRemaining / (Double)speed);
+
+            // In case there is clock skew
+            if (remaining < TimeSpan.Zero)
+            {
+                remaining = TimeSpan.Zero;
+            }
+        }
+
+        var result = new TorrentInfo
+        {
+            AddedOn = torrent.Added.ToUnixTimeSeconds(),
+            AmountLeft = bytesTotal - bytesDone,
+            AutoTmm = false,
+            Availability = 2,
+            Category = torrent.Category ?? "",
+            Completed = bytesDone,
+            CompletionOn = torrent.Completed?.ToUnixTimeSeconds(),
+            ContentPath = torrentPath,
+            DlLimit = -1,
+            Dlspeed = speed,
+            Downloaded = bytesDone,
+            DownloadedSession = bytesDone,
+            Eta = (Int64)remaining.TotalSeconds,
+            FlPiecePrio = false,
+            ForceStart = false,
+            Hash = torrent.Hash,
+            LastActivity = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+            MagnetUri = "",
+            MaxRatio = -1,
+            MaxSeedingTime = -1,
+            Name = torrent.RdName,
+            NumComplete = 10,
+            NumIncomplete = 0,
+            NumLeechs = 1,
+            NumSeeds = torrent.RdSeeders ?? 1,
+            Priority = prio,
+            Progress = (Single)progress,
+            Ratio = 1,
+            RatioLimit = 1,
+            SavePath = downloadPath,
+            SeedingTimeLimit = 1,
+            SeenComplete = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+            SeqDl = false,
+            Size = bytesTotal,
+            State = "downloading",
+            SuperSeeding = false,
+            Tags = "",
+            TimeActive = (Int64)(DateTimeOffset.UtcNow - torrent.Added).TotalSeconds,
+            TotalSize = bytesTotal,
+            Tracker = "udp://tracker.opentrackr.org:1337",
+            UpLimit = -1,
+            Uploaded = bytesDone,
+            UploadedSession = bytesDone,
+            Upspeed = speed
+        };
+
+        if (!String.IsNullOrWhiteSpace(torrent.Error))
+        {
+            result.State = "error";
+        }
+        else if (torrent.Completed.HasValue)
+        {
+            result.State = "pausedUP";
+        }
+        else if (torrent.RdStatus == TorrentStatus.Downloading && torrent.RdSeeders < 1)
+        {
+            result.State = "stalledDL";
+        }
+
+        return result;
+    }
+
     public async Task<IList<TorrentFileItem>?> TorrentFileContents(String hash)
     {
-        var results = new List<TorrentFileItem>();
-
         var torrent = await torrents.GetByHash(hash);
 
         if (torrent == null)
         {
-            return null;
+            return qbittorrentFallbackClient.IsEnabledAndConfigured()
+                ? await qbittorrentFallbackClient.GetFiles(hash)
+                : null;
         }
+
+        if (Torrents.IsQbittorrentFallback(torrent))
+        {
+            return await qbittorrentFallbackClient.GetFiles(hash);
+        }
+
+        var results = new List<TorrentFileItem>();
 
         foreach (var file in torrent.Files.Where(m => m.Selected))
         {
@@ -347,7 +390,14 @@ public class QBittorrent(ILogger<QBittorrent> logger, Settings settings, Authent
 
         if (torrent == null)
         {
-            return null;
+            return qbittorrentFallbackClient.IsEnabledAndConfigured()
+                ? await qbittorrentFallbackClient.GetProperties(hash)
+                : null;
+        }
+
+        if (Torrents.IsQbittorrentFallback(torrent))
+        {
+            return await qbittorrentFallbackClient.GetProperties(hash);
         }
 
         if (!String.IsNullOrWhiteSpace(torrent.Category))
@@ -421,6 +471,19 @@ public class QBittorrent(ILogger<QBittorrent> logger, Settings settings, Authent
 
         if (torrent == null)
         {
+            if (qbittorrentFallbackClient.IsEnabledAndConfigured())
+            {
+                await qbittorrentFallbackClient.Delete(hash, deleteFiles);
+            }
+
+            return;
+        }
+
+        if (Torrents.IsQbittorrentFallback(torrent))
+        {
+            await qbittorrentFallbackClient.Delete(hash, deleteFiles);
+            await torrents.Delete(torrent.TorrentId, true, false, false);
+
             return;
         }
 
@@ -504,6 +567,20 @@ public class QBittorrent(ILogger<QBittorrent> logger, Settings settings, Authent
 
     public async Task TorrentsSetCategory(String hash, String? category)
     {
+        var torrent = await torrents.GetByHash(hash);
+
+        if (torrent == null)
+        {
+            if (qbittorrentFallbackClient.IsEnabledAndConfigured())
+            {
+                await qbittorrentFallbackClient.SetCategory(hash, category);
+            }
+        }
+        else if (Torrents.IsQbittorrentFallback(torrent))
+        {
+            await qbittorrentFallbackClient.SetCategory(hash, category);
+        }
+
         await torrents.UpdateCategory(hash, category);
     }
 
@@ -592,6 +669,20 @@ public class QBittorrent(ILogger<QBittorrent> logger, Settings settings, Authent
 
     public async Task TorrentsTopPrio(String hash)
     {
+        var torrent = await torrents.GetByHash(hash);
+
+        if (torrent == null)
+        {
+            if (qbittorrentFallbackClient.IsEnabledAndConfigured())
+            {
+                await qbittorrentFallbackClient.TopPriority(hash);
+            }
+        }
+        else if (Torrents.IsQbittorrentFallback(torrent))
+        {
+            await qbittorrentFallbackClient.TopPriority(hash);
+        }
+
         await torrents.UpdatePriority(hash, 1);
     }
 
@@ -601,6 +692,18 @@ public class QBittorrent(ILogger<QBittorrent> logger, Settings settings, Authent
 
         if (torrent == null)
         {
+            if (qbittorrentFallbackClient.IsEnabledAndConfigured())
+            {
+                await qbittorrentFallbackClient.Pause(hash);
+            }
+
+            return;
+        }
+
+        if (Torrents.IsQbittorrentFallback(torrent))
+        {
+            await qbittorrentFallbackClient.Pause(hash);
+
             return;
         }
 
@@ -621,6 +724,18 @@ public class QBittorrent(ILogger<QBittorrent> logger, Settings settings, Authent
 
         if (torrent == null)
         {
+            if (qbittorrentFallbackClient.IsEnabledAndConfigured())
+            {
+                await qbittorrentFallbackClient.Resume(hash);
+            }
+
+            return;
+        }
+
+        if (Torrents.IsQbittorrentFallback(torrent))
+        {
+            await qbittorrentFallbackClient.Resume(hash);
+
             return;
         }
 
@@ -641,7 +756,7 @@ public class QBittorrent(ILogger<QBittorrent> logger, Settings settings, Authent
 
         var categories = await TorrentsCategories();
 
-        var activeDownloads = TorrentRunner.ActiveDownloadClients.Sum(m => m.Value.Speed);
+        var activeDownloads = torrentInfo.Sum(m => m.Dlspeed ?? 0);
 
         return new()
         {
