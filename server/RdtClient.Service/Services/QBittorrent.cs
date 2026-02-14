@@ -262,7 +262,7 @@ public class QBittorrent(ILogger<QBittorrent> logger,
                 }
             }
 
-            var rdProgress = Math.Clamp(torrent.RdProgress ?? 0.0, 0.0, 100.0) / 100.0;
+            var rdProgress = NormalizeFraction((torrent.RdProgress ?? 0.0) / 100.0);
             var bytesTotal = torrent.RdSize ?? 0;
             var speed = torrent.RdSpeed ?? 0;
             var bytesDone = (Int64)(bytesTotal * rdProgress);
@@ -279,7 +279,7 @@ public class QBittorrent(ILogger<QBittorrent> logger,
                 var dlBytesDone = dlStats.Sum(m => m.BytesDone);
                 var dlBytesTotal = dlStats.Sum(m => m.BytesTotal);
                 speed = (Int32)(dlStats.Any() ? dlStats.Average(m => m.Speed) : 0);
-                var downloadProgress = dlBytesTotal > 0 ? Math.Clamp((Double)dlBytesDone / dlBytesTotal, 0.0, 1.0) : 0;
+                var downloadProgress = dlBytesTotal > 0 ? NormalizeFraction((Double)dlBytesDone / dlBytesTotal) : 0;
 
                 if (rdProgress >= 1.0 && downloadProgress >= 1.0)
                 {
@@ -287,7 +287,7 @@ public class QBittorrent(ILogger<QBittorrent> logger,
                 }
                 else
                 {
-                    progress = (rdProgress + downloadProgress) / 2.0;
+                    progress = NormalizeFraction((rdProgress + downloadProgress) / 2.0);
                 }
             }
             else
@@ -530,6 +530,16 @@ public class QBittorrent(ILogger<QBittorrent> logger,
         var separatorIndex = path.IndexOfAny(['/', '\\']);
 
         return separatorIndex < 0 ? path : path[..separatorIndex];
+    }
+
+    private static Double NormalizeFraction(Double value)
+    {
+        if (Double.IsNaN(value) || Double.IsInfinity(value))
+        {
+            return 0;
+        }
+
+        return Math.Clamp(value, 0.0, 1.0);
     }
 
     public async Task<IList<TorrentFileItem>?> TorrentFileContents(String hash)
