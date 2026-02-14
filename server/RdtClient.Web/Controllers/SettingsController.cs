@@ -14,7 +14,7 @@ namespace RdtClient.Web.Controllers;
 
 [Authorize(Policy = "AuthSetting")]
 [Route("Api/Settings")]
-public class SettingsController(ISettings settings, Torrents torrents) : Controller
+public class SettingsController(ISettings settings, Torrents torrents, QbittorrentFallbackClient qbittorrentFallbackClient) : Controller
 {
     [HttpGet]
     [Route("")]
@@ -210,6 +210,23 @@ public class SettingsController(ISettings settings, Torrents torrents) : Control
 
         return Ok(version);
     }
+
+    [HttpPost]
+    [Route("TestQbittorrentFallbackConnection")]
+    public async Task<ActionResult<String>> TestQbittorrentFallbackConnection([FromBody] SettingsControllerTestQbittorrentFallbackConnectionRequest? request)
+    {
+        if (request == null)
+        {
+            return BadRequest();
+        }
+
+        var version = await qbittorrentFallbackClient.TestConnection(request.Url, request.Username, request.Password, request.IgnoreTlsErrors, request.Timeout);
+
+        return Ok(new
+        {
+            Version = version
+        });
+    }
 }
 
 public class SettingsControllerTestPathRequest
@@ -221,4 +238,13 @@ public class SettingsControllerTestAria2cConnectionRequest
 {
     public String? Url { get; set; }
     public String? Secret { get; set; }
+}
+
+public class SettingsControllerTestQbittorrentFallbackConnectionRequest
+{
+    public String? Url { get; set; }
+    public String? Username { get; set; }
+    public String? Password { get; set; }
+    public Boolean IgnoreTlsErrors { get; set; }
+    public Int32 Timeout { get; set; } = 15;
 }

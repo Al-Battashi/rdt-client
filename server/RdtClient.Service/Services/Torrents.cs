@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Xml;
 using System.Xml.Linq;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 using MonoTorrent;
 using RdtClient.Data.Data;
@@ -13,6 +14,7 @@ using RdtClient.Data.Enums;
 using RdtClient.Data.Models.Data;
 using RdtClient.Data.Models.DebridClient;
 using RdtClient.Data.Models.Internal;
+using RdtClient.Data.Models.QBittorrent;
 using RdtClient.Service.BackgroundServices;
 using RdtClient.Service.Helpers;
 using RdtClient.Service.Services.DebridClients;
@@ -23,6 +25,8 @@ namespace RdtClient.Service.Services;
 
 public class Torrents(
     ILogger<Torrents> logger,
+    IHttpClientFactory httpClientFactory,
+    IMemoryCache memoryCache,
     ITorrentData torrentData,
     IDownloads downloads,
     IProcessFactory processFactory,
@@ -34,7 +38,8 @@ public class Torrents(
     DebridLinkClient debridLinkClient,
     TorBoxDebridClient torBoxDebridClient,
     ISettings settings,
-    ITorrentRunnerState runnerState)
+    ITorrentRunnerState runnerState,
+    QbittorrentFallbackClient qbittorrentFallbackClient)
 {
     private static readonly SemaphoreSlim RealDebridUpdateLock = new(1, 1);
 
@@ -70,6 +75,8 @@ public class Torrents(
     {
         var torrents = await torrentData.Get();
 
+        await SyncQbittorrentFallbackTorrents(torrents);
+
         return torrents;
     }
 
@@ -77,7 +84,17 @@ public class Torrents(
     {
         var torrent = await torrentData.GetByHash(hash);
 
-        if (torrent != null)
+        if (torrent != null && IsQbittorrentFallback(torrent))
+        {
+            var torrents = new List<Torrent>
+            {
+                torrent
+            };
+
+            await SyncQbittorrentFallbackTorrents(torrents);
+            torrent = torrents.FirstOrDefault();
+        }
+        else if (torrent != null)
         {
             await UpdateTorrentClientData(torrent);
         }
@@ -97,6 +114,11 @@ public class Torrents(
         Log($"Update category to {category}", torrent);
 
         await torrentData.UpdateCategory(torrent.TorrentId, category);
+    }
+
+    public static Boolean IsQbittorrentFallback(Torrent torrent)
+    {
+        return QbittorrentFallbackClient.IsFallbackTorrent(torrent);
     }
 
     public virtual async Task<Torrent> AddNzbLinkToDebridQueue(String nzbLink, Torrent torrent)
@@ -410,6 +432,137 @@ public class Torrents(
         }
     }
 
+    public async Task<Boolean> TryFallbackToQbittorrent(Torrent torrent, Exception exception)
+    {
+        if (!ShouldFallbackToQbittorrent(exception))
+        {
+            return false;
+        }
+
+        if (!qbittorrentFallbackClient.IsEnabledAndConfigured())
+        {
+            logger.LogError("qBittorrent fallback was not attempted because the fallback client is not configured {torrentInfo}", torrent.ToLog());
+
+            return false;
+        }
+
+        if (String.IsNullOrWhiteSpace(torrent.FileOrMagnet))
+        {
+            logger.LogError("Cannot use qBittorrent fallback because the torrent payload is missing {torrentInfo}", torrent.ToLog());
+
+            return false;
+        }
+
+        try
+        {
+            return await SendToQbittorrentFallback(torrent, QbittorrentFallbackClient.FallbackStatusRaw);
+        }
+        catch (Exception fallbackException)
+        {
+            logger.LogError(fallbackException, "qBittorrent fallback failed {torrentInfo}", torrent.ToLog());
+
+            return false;
+        }
+    }
+
+    public async Task<Boolean> TryFallbackToQbittorrentOnProviderCacheMiss(Torrent torrent)
+    {
+        if (settings.Current.Provider.Provider != Provider.RealDebrid)
+        {
+            return false;
+        }
+
+        if (!settings.Current.Integrations.QbittorrentFallback.SendNonCachedToQbittorrent)
+        {
+            return false;
+        }
+
+        if (!qbittorrentFallbackClient.IsEnabledAndConfigured())
+        {
+            logger.LogError("Cannot route non-cached torrent to qBittorrent because fallback client is not configured {torrentInfo}", torrent.ToLog());
+
+            return false;
+        }
+
+        if (String.IsNullOrWhiteSpace(torrent.FileOrMagnet))
+        {
+            logger.LogError("Cannot route non-cached torrent to qBittorrent because payload is missing {torrentInfo}", torrent.ToLog());
+
+            return false;
+        }
+
+        try
+        {
+            return await SendToQbittorrentFallback(torrent, "qbittorrent_fallback_not_cached");
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Unable to send non-cached provider torrent to qBittorrent fallback {torrentInfo}", torrent.ToLog());
+
+            return false;
+        }
+    }
+
+    public async Task<Boolean?> IsProviderInstantlyAvailable(Torrent torrent)
+    {
+        if (settings.Current.Provider.Provider != Provider.RealDebrid)
+        {
+            return null;
+        }
+
+        if (String.IsNullOrWhiteSpace(settings.Current.Provider.ApiKey))
+        {
+            return null;
+        }
+
+        var cacheKey = $"provider-instant-availability:{settings.Current.Provider.Provider}:{torrent.Hash.ToLowerInvariant()}";
+
+        if (memoryCache.TryGetValue<Boolean>(cacheKey, out var cachedValue))
+        {
+            return cachedValue;
+        }
+
+        try
+        {
+            var host = String.IsNullOrWhiteSpace(settings.Current.Provider.ApiHostname) ? "api.real-debrid.com" : settings.Current.Provider.ApiHostname!.Trim();
+            var requestUri = $"https://{host}/rest/1.0/torrents/instantAvailability/{torrent.Hash.ToLowerInvariant()}";
+
+            using var request = new HttpRequestMessage(HttpMethod.Get, requestUri);
+            request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", settings.Current.Provider.ApiKey);
+
+            var client = httpClientFactory.CreateClient(DiConfig.RD_CLIENT);
+            client.Timeout = TimeSpan.FromSeconds(Math.Max(settings.Current.Provider.Timeout, 5));
+
+            using var response = await client.SendAsync(request);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                logger.LogDebug("Instant availability lookup failed with status {statusCode} {torrentInfo}", (Int32)response.StatusCode, torrent.ToLog());
+
+                return null;
+            }
+
+            var body = await response.Content.ReadAsStringAsync();
+
+            using var doc = JsonDocument.Parse(body);
+
+            var isAvailable = ParseInstantAvailability(doc.RootElement, torrent.Hash);
+
+            if (isAvailable.HasValue)
+            {
+                memoryCache.Set(cacheKey, isAvailable.Value, TimeSpan.FromSeconds(45));
+            }
+
+            return isAvailable;
+        }
+        catch (Exception ex)
+        {
+            logger.LogDebug(ex, "Unable to determine instant provider availability {torrentInfo}", torrent.ToLog());
+
+            return null;
+        }
+    }
+
     public async Task<IList<DebridClientAvailableFile>> GetAvailableFiles(String hash)
     {
         var result = await DebridClient.GetAvailableFiles(hash);
@@ -506,6 +659,29 @@ public class Torrents(
         }
 
         Log($"Deleting", torrent);
+
+        if (IsQbittorrentFallback(torrent))
+        {
+            var shouldDeleteFromQbittorrent = deleteRdTorrent || deleteLocalFiles;
+
+            if (shouldDeleteFromQbittorrent)
+            {
+                if (!qbittorrentFallbackClient.IsEnabledAndConfigured())
+                {
+                    throw new("qBittorrent fallback is not configured, unable to delete torrent from qBittorrent.");
+                }
+
+                await qbittorrentFallbackClient.Delete(torrent.Hash, deleteLocalFiles);
+            }
+
+            if (deleteData || shouldDeleteFromQbittorrent)
+            {
+                await downloads.DeleteForTorrent(torrent.TorrentId);
+                await torrentData.Delete(torrent.TorrentId);
+            }
+
+            return;
+        }
 
         await UpdateComplete(torrentId, "Torrent deleted", DateTimeOffset.UtcNow, false);
 
@@ -653,11 +829,12 @@ public class Torrents(
         await RealDebridUpdateLock.WaitAsync();
 
         var torrents = await Get();
+        var providerManagedTorrents = torrents.Where(t => !IsQbittorrentFallback(t)).ToList();
 
         try
         {
             var rdTorrents = await DebridClient.GetDownloads();
-            var torrentsByRdId = CreateTorrentLookupByRdId(torrents);
+            var torrentsByRdId = CreateTorrentLookupByRdId(providerManagedTorrents);
             var providerTorrentsById = CreateProviderTorrentLookupById(rdTorrents);
 
             foreach (var rdTorrent in rdTorrents)
@@ -671,11 +848,11 @@ public class Torrents(
                     && !String.IsNullOrWhiteSpace(rdTorrent.Hash)
                     && !String.IsNullOrWhiteSpace(rdTorrent.Id))
                 {
-                    torrent = torrents.FirstOrDefault(localTorrent => localTorrent is { Type: DownloadType.Torrent, ClientKind: null or Provider.TorBox }
-                                                                      && !String.IsNullOrWhiteSpace(localTorrent.Hash)
-                                                                      && !String.IsNullOrWhiteSpace(localTorrent.RdId)
-                                                                      && localTorrent.RdId.Equals(localTorrent.Hash, StringComparison.OrdinalIgnoreCase)
-                                                                      && localTorrent.Hash.Equals(rdTorrent.Hash, StringComparison.OrdinalIgnoreCase));
+                    torrent = providerManagedTorrents.FirstOrDefault(localTorrent => localTorrent is { Type: DownloadType.Torrent, ClientKind: null or Provider.TorBox }
+                                                                                     && !String.IsNullOrWhiteSpace(localTorrent.Hash)
+                                                                                     && !String.IsNullOrWhiteSpace(localTorrent.RdId)
+                                                                                     && localTorrent.RdId.Equals(localTorrent.Hash, StringComparison.OrdinalIgnoreCase)
+                                                                                     && localTorrent.Hash.Equals(rdTorrent.Hash, StringComparison.OrdinalIgnoreCase));
 
                     if (torrent != null)
                     {
@@ -727,6 +904,7 @@ public class Torrents(
                     torrent = await torrentData.Add(rdTorrent.Id, rdTorrent.Hash, null, false, DownloadType.Torrent, settings.Current.DownloadClient.Client, newTorrent);
                     torrentsByRdId[rdTorrent.Id] = torrent;
                     torrents.Add(torrent);
+                    providerManagedTorrents.Add(torrent);
 
                     await UpdateTorrentClientData(torrent, rdTorrent);
                 }
@@ -736,7 +914,7 @@ public class Torrents(
                 }
             }
 
-            foreach (var torrent in torrents)
+            foreach (var torrent in providerManagedTorrents)
             {
                 var rdTorrent = torrent.RdId != null && providerTorrentsById.TryGetValue(torrent.RdId, out var providerTorrent) ? providerTorrent : null;
 
@@ -958,7 +1136,10 @@ public class Torrents(
             return null;
         }
 
-        await UpdateTorrentClientData(torrent);
+        if (!IsQbittorrentFallback(torrent))
+        {
+            await UpdateTorrentClientData(torrent);
+        }
 
         return torrent;
     }
@@ -1104,6 +1285,11 @@ public class Torrents(
 
     private async Task UpdateTorrentClientData(Torrent torrent, DebridClientTorrent? torrentClientTorrent = null)
     {
+        if (IsQbittorrentFallback(torrent))
+        {
+            return;
+        }
+
         try
         {
             var originalTorrent = CaptureRdState(torrent);
@@ -1182,6 +1368,350 @@ public class Torrents(
         Int64? RdSpeed,
         Int64? RdSeeders,
         String? RdFiles);
+
+    private async Task SyncQbittorrentFallbackTorrents(IList<Torrent> torrents)
+    {
+        var fallbackTorrents = torrents.Where(IsQbittorrentFallback).ToList();
+
+        if (fallbackTorrents.Count == 0)
+        {
+            return;
+        }
+
+        if (!qbittorrentFallbackClient.IsEnabledAndConfigured())
+        {
+            return;
+        }
+
+        IList<TorrentInfo> qbtTorrents;
+
+        try
+        {
+            qbtTorrents = await qbittorrentFallbackClient.GetTorrents();
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Unable to sync qBittorrent fallback state");
+
+            return;
+        }
+
+        var qbtTorrentsByHash = qbtTorrents.Where(m => !String.IsNullOrWhiteSpace(m.Hash))
+                                           .ToDictionary(m => m.Hash, m => m, StringComparer.OrdinalIgnoreCase);
+
+        var toDelete = new List<Torrent>();
+
+        foreach (var fallbackTorrent in fallbackTorrents)
+        {
+            if (qbtTorrentsByHash.TryGetValue(fallbackTorrent.Hash, out var qbtTorrent))
+            {
+                var changed = ApplyQbittorrentFallbackState(fallbackTorrent, qbtTorrent);
+                var shouldBeCompleted = fallbackTorrent.RdStatus == TorrentStatus.Finished && String.IsNullOrWhiteSpace(fallbackTorrent.Error);
+                var needsCompleteUpdate = shouldBeCompleted != fallbackTorrent.Completed.HasValue;
+
+                if (changed)
+                {
+                    await torrentData.UpdateRdData(fallbackTorrent);
+                }
+
+                if (needsCompleteUpdate)
+                {
+                    logger.LogInformation("Updating fallback completion state. completed={completed} {torrentInfo}", shouldBeCompleted, fallbackTorrent.ToLog());
+                    await torrentData.UpdateComplete(fallbackTorrent.TorrentId, null, shouldBeCompleted ? DateTimeOffset.UtcNow : null, false);
+                }
+
+                continue;
+            }
+
+            // qBittorrent can take a moment to expose a just-added torrent through the API.
+            if (fallbackTorrent.RdAdded.HasValue && DateTimeOffset.UtcNow - fallbackTorrent.RdAdded.Value < TimeSpan.FromMinutes(2))
+            {
+                continue;
+            }
+
+            logger.LogInformation("Removing fallback torrent from rdt-client because it no longer exists in qBittorrent {torrentInfo}",
+                                  fallbackTorrent.ToLog());
+
+            toDelete.Add(fallbackTorrent);
+        }
+
+        foreach (var staleTorrent in toDelete)
+        {
+            await downloads.DeleteForTorrent(staleTorrent.TorrentId);
+            await torrentData.Delete(staleTorrent.TorrentId);
+            torrents.Remove(staleTorrent);
+        }
+    }
+
+    private static Boolean ApplyQbittorrentFallbackState(Torrent torrent, TorrentInfo qbtTorrent)
+    {
+        var changed = false;
+
+        var expectedRdId = QbittorrentFallbackClient.ToFallbackId(torrent.Hash);
+
+        if (!String.Equals(torrent.RdId, expectedRdId, StringComparison.OrdinalIgnoreCase))
+        {
+            torrent.RdId = expectedRdId;
+            changed = true;
+        }
+
+        if (!String.Equals(torrent.RdHost, "qBittorrent", StringComparison.Ordinal))
+        {
+            torrent.RdHost = "qBittorrent";
+            changed = true;
+        }
+
+        var name = String.IsNullOrWhiteSpace(qbtTorrent.Name) ? torrent.RdName : qbtTorrent.Name;
+
+        if (!String.Equals(torrent.RdName, name, StringComparison.Ordinal))
+        {
+            torrent.RdName = name;
+            changed = true;
+        }
+
+        var size = qbtTorrent.TotalSize ?? qbtTorrent.Size ?? torrent.RdSize;
+
+        if (torrent.RdSize != size)
+        {
+            torrent.RdSize = size;
+            changed = true;
+        }
+
+        var safeProgress = Single.IsNaN(qbtTorrent.Progress) || Single.IsInfinity(qbtTorrent.Progress)
+            ? 0
+            : qbtTorrent.Progress;
+        var progress = (Int64)Math.Clamp(Math.Round(safeProgress * 100), 0, 100);
+
+        if (torrent.RdProgress != progress)
+        {
+            torrent.RdProgress = progress;
+            changed = true;
+        }
+
+        var speed = qbtTorrent.Dlspeed ?? 0;
+
+        if (torrent.RdSpeed != speed)
+        {
+            torrent.RdSpeed = speed;
+            changed = true;
+        }
+
+        var seeders = qbtTorrent.NumSeeds ?? qbtTorrent.NumComplete ?? 0;
+
+        if (torrent.RdSeeders != seeders)
+        {
+            torrent.RdSeeders = seeders;
+            changed = true;
+        }
+
+        var statusRaw = qbtTorrent.State ?? QbittorrentFallbackClient.FallbackStatusRaw;
+
+        if (!String.Equals(torrent.RdStatusRaw, statusRaw, StringComparison.Ordinal))
+        {
+            torrent.RdStatusRaw = statusRaw;
+            changed = true;
+        }
+
+        var status = MapQbittorrentState(statusRaw, progress);
+
+        if (torrent.RdStatus != status)
+        {
+            torrent.RdStatus = status;
+            changed = true;
+        }
+
+        var added = FromUnixTime(qbtTorrent.AddedOn) ?? torrent.RdAdded ?? DateTimeOffset.UtcNow;
+
+        if (torrent.RdAdded != added)
+        {
+            torrent.RdAdded = added;
+            changed = true;
+        }
+
+        DateTimeOffset? ended = progress >= 100 ? (FromUnixTime(qbtTorrent.CompletionOn) ?? DateTimeOffset.UtcNow) : null;
+
+        if (torrent.RdEnded != ended)
+        {
+            torrent.RdEnded = ended;
+            changed = true;
+        }
+
+        return changed;
+    }
+
+    private static TorrentStatus MapQbittorrentState(String statusRaw, Int64 progress)
+    {
+        var state = statusRaw.Trim().ToLowerInvariant();
+
+        if (state.Contains("error") || state.Contains("missing"))
+        {
+            return TorrentStatus.Error;
+        }
+
+        if (progress >= 100 || state.Contains("up"))
+        {
+            return TorrentStatus.Finished;
+        }
+
+        if (state.Contains("queued"))
+        {
+            return TorrentStatus.Queued;
+        }
+
+        if (state.Contains("check") || state.Contains("allocat") || state.Contains("meta") || state.Contains("mov"))
+        {
+            return TorrentStatus.Processing;
+        }
+
+        return TorrentStatus.Downloading;
+    }
+
+    private static DateTimeOffset? FromUnixTime(Int64? unixSeconds)
+    {
+        if (!unixSeconds.HasValue || unixSeconds <= 0)
+        {
+            return null;
+        }
+
+        try
+        {
+            return DateTimeOffset.FromUnixTimeSeconds(unixSeconds.Value);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private async Task<Boolean> SendToQbittorrentFallback(Torrent torrent, String statusRaw)
+    {
+        var fallbackSavePath = GetQbittorrentFallbackSavePath(torrent);
+
+        if (torrent.IsFile)
+        {
+            var fileBytes = Convert.FromBase64String(torrent.FileOrMagnet!);
+            await qbittorrentFallbackClient.AddFile(fileBytes, torrent.Category, torrent.Priority, fallbackSavePath);
+        }
+        else
+        {
+            await qbittorrentFallbackClient.AddMagnet(torrent.FileOrMagnet!, torrent.Category, torrent.Priority, fallbackSavePath);
+        }
+
+        torrent.RdId = QbittorrentFallbackClient.ToFallbackId(torrent.Hash);
+        torrent.RdStatus = TorrentStatus.Downloading;
+        torrent.RdStatusRaw = statusRaw;
+        torrent.RdHost = "qBittorrent";
+        torrent.RdAdded = DateTimeOffset.UtcNow;
+        torrent.RdEnded = null;
+        torrent.RdProgress = 0;
+        torrent.RdSpeed = 0;
+        torrent.RdSeeders = 0;
+
+        await torrentData.UpdateRdId(torrent, torrent.RdId);
+        await torrentData.UpdateRdData(torrent);
+        await torrentData.UpdateComplete(torrent.TorrentId, null, null, false);
+        await torrentData.UpdateRetry(torrent.TorrentId, null, 0);
+
+        logger.LogInformation("Sent torrent to external qBittorrent fallback successfully. SavePath: {savePath} {torrentInfo}",
+                              fallbackSavePath ?? "<qB default>",
+                              torrent.ToLog());
+
+        return true;
+    }
+
+    private static Boolean? ParseInstantAvailability(JsonElement root, String hash)
+    {
+        if (root.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        JsonElement hashNode;
+
+        if (!root.TryGetProperty(hash.ToLowerInvariant(), out hashNode) &&
+            !root.TryGetProperty(hash.ToUpperInvariant(), out hashNode) &&
+            !root.TryGetProperty(hash, out hashNode))
+        {
+            return null;
+        }
+
+        return HasAvailabilityData(hashNode);
+    }
+
+    private static Boolean HasAvailabilityData(JsonElement element)
+    {
+        switch (element.ValueKind)
+        {
+            case JsonValueKind.Object:
+                foreach (var property in element.EnumerateObject())
+                {
+                    if (HasAvailabilityData(property.Value))
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+            case JsonValueKind.Array:
+                foreach (var item in element.EnumerateArray())
+                {
+                    if (HasAvailabilityData(item))
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+            case JsonValueKind.String:
+                return !String.IsNullOrWhiteSpace(element.GetString());
+            case JsonValueKind.Number:
+            case JsonValueKind.True:
+            case JsonValueKind.False:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private Boolean ShouldFallbackToQbittorrent(Exception exception)
+    {
+        if (settings.Current.Provider.Provider != Provider.RealDebrid)
+        {
+            return false;
+        }
+
+        for (var currentException = exception; currentException != null; currentException = currentException.InnerException)
+        {
+            if (currentException is RDNET.RealDebridException realDebridException && realDebridException.ErrorCode == 35)
+            {
+                return true;
+            }
+
+            if (currentException.Message.Contains("Infringing file", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private String? GetQbittorrentFallbackSavePath(Torrent torrent)
+    {
+        var basePath = settings.Current.DownloadClient.DownloadPath;
+
+        if (String.IsNullOrWhiteSpace(basePath))
+        {
+            return null;
+        }
+
+        if (!String.IsNullOrWhiteSpace(torrent.Category))
+        {
+            return Path.Combine(basePath, torrent.Category);
+        }
+
+        return basePath;
+    }
 
     private void Log(String message, Download? download, Torrent? torrent)
     {

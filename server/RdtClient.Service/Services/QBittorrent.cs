@@ -5,7 +5,13 @@ using RdtClient.Data.Models.QBittorrent;
 
 namespace RdtClient.Service.Services;
 
-public class QBittorrent(ILogger<QBittorrent> logger, ISettings settings, Authentication authentication, Torrents torrents, Downloads downloads, ITorrentRunnerState runnerState)
+public class QBittorrent(ILogger<QBittorrent> logger,
+                         ISettings settings,
+                         Authentication authentication,
+                         Torrents torrents,
+                         Downloads downloads,
+                         ITorrentRunnerState runnerState,
+                         QbittorrentFallbackClient qbittorrentFallbackClient)
 {
     public async Task<Boolean> AuthLogin(String userName, String password)
     {
@@ -192,10 +198,38 @@ public class QBittorrent(ILogger<QBittorrent> logger, ISettings settings, Authen
         var allTorrents = await torrents.Get();
         allTorrents = allTorrents.Where(m => m.Type == DownloadType.Torrent).ToList();
 
+        var fallbackTorrents = allTorrents.Where(Torrents.IsQbittorrentFallback).ToList();
+        var fallbackByHash = new Dictionary<String, TorrentInfo>(StringComparer.OrdinalIgnoreCase);
+
+        if (fallbackTorrents.Count > 0 && qbittorrentFallbackClient.IsEnabledAndConfigured())
+        {
+            try
+            {
+                var fallbackInfos = await qbittorrentFallbackClient.GetTorrents();
+
+                fallbackByHash = fallbackInfos
+                                 .Where(m => !String.IsNullOrWhiteSpace(m.Hash))
+                                 .ToDictionary(m => m.Hash, m => m, StringComparer.OrdinalIgnoreCase);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Unable to fetch qBittorrent fallback torrent list");
+            }
+        }
+
         var prio = 0;
 
         foreach (var torrent in allTorrents)
         {
+            if (Torrents.IsQbittorrentFallback(torrent) && fallbackByHash.TryGetValue(torrent.Hash, out var fallbackInfo))
+            {
+                fallbackInfo.Category = torrent.Category ?? fallbackInfo.Category;
+                fallbackInfo.Priority ??= ++prio;
+                results.Add(fallbackInfo);
+
+                continue;
+            }
+
             var downloadPath = savePath;
 
             if (!String.IsNullOrWhiteSpace(torrent.Category))
@@ -323,11 +357,15 @@ public class QBittorrent(ILogger<QBittorrent> logger, ISettings settings, Authen
             {
                 result.State = "error";
             }
+            else if (Torrents.IsQbittorrentFallback(torrent) && !String.IsNullOrWhiteSpace(torrent.RdStatusRaw))
+            {
+                result.State = torrent.RdStatusRaw;
+            }
             else if (torrent.Completed.HasValue)
             {
                 result.State = "pausedUP";
             }
-            else if (torrent.RdStatus == TorrentStatus.Downloading && torrent.RdSeeders < 1)
+            else if (torrent.RdStatus == TorrentStatus.Downloading && torrent.RdSeeders < 1 && !Torrents.IsQbittorrentFallback(torrent))
             {
                 result.State = "stalledDL";
             }
@@ -500,7 +538,14 @@ public class QBittorrent(ILogger<QBittorrent> logger, ISettings settings, Authen
 
         if (torrent == null || torrent.Type != DownloadType.Torrent)
         {
-            return null;
+            return qbittorrentFallbackClient.IsEnabledAndConfigured()
+                ? await qbittorrentFallbackClient.GetFiles(hash)
+                : null;
+        }
+
+        if (Torrents.IsQbittorrentFallback(torrent))
+        {
+            return await qbittorrentFallbackClient.GetFiles(hash);
         }
 
         var progress = torrent.Completed.HasValue || torrent.RdStatus == TorrentStatus.Finished ? 1f : 0f;
@@ -526,7 +571,14 @@ public class QBittorrent(ILogger<QBittorrent> logger, ISettings settings, Authen
 
         if (torrent == null || torrent.Type != DownloadType.Torrent)
         {
-            return null;
+            return qbittorrentFallbackClient.IsEnabledAndConfigured()
+                ? await qbittorrentFallbackClient.GetProperties(hash)
+                : null;
+        }
+
+        if (Torrents.IsQbittorrentFallback(torrent))
+        {
+            return await qbittorrentFallbackClient.GetProperties(hash);
         }
 
         if (!String.IsNullOrWhiteSpace(torrent.Category))
@@ -607,6 +659,19 @@ public class QBittorrent(ILogger<QBittorrent> logger, ISettings settings, Authen
 
         if (torrent == null || torrent.Type != DownloadType.Torrent)
         {
+            if (qbittorrentFallbackClient.IsEnabledAndConfigured())
+            {
+                await qbittorrentFallbackClient.Delete(hash, deleteFiles);
+            }
+
+            return;
+        }
+
+        if (Torrents.IsQbittorrentFallback(torrent))
+        {
+            await qbittorrentFallbackClient.Delete(hash, deleteFiles);
+            await torrents.Delete(torrent.TorrentId, true, false, false);
+
             return;
         }
 
@@ -690,6 +755,20 @@ public class QBittorrent(ILogger<QBittorrent> logger, ISettings settings, Authen
 
     public async Task TorrentsSetCategory(String hash, String? category)
     {
+        var torrent = await torrents.GetByHash(hash);
+
+        if (torrent == null)
+        {
+            if (qbittorrentFallbackClient.IsEnabledAndConfigured())
+            {
+                await qbittorrentFallbackClient.SetCategory(hash, category);
+            }
+        }
+        else if (Torrents.IsQbittorrentFallback(torrent))
+        {
+            await qbittorrentFallbackClient.SetCategory(hash, category);
+        }
+
         await torrents.UpdateCategory(hash, category);
     }
 
@@ -780,7 +859,18 @@ public class QBittorrent(ILogger<QBittorrent> logger, ISettings settings, Authen
     {
         var torrent = await torrents.GetByHash(hash);
 
-        if (torrent == null || torrent.Type != DownloadType.Torrent)
+        if (torrent == null)
+        {
+            if (qbittorrentFallbackClient.IsEnabledAndConfigured())
+            {
+                await qbittorrentFallbackClient.TopPriority(hash);
+            }
+        }
+        else if (Torrents.IsQbittorrentFallback(torrent))
+        {
+            await qbittorrentFallbackClient.TopPriority(hash);
+        }
+        else if (torrent.Type != DownloadType.Torrent)
         {
             return;
         }
@@ -794,6 +884,18 @@ public class QBittorrent(ILogger<QBittorrent> logger, ISettings settings, Authen
 
         if (torrent == null || torrent.Type != DownloadType.Torrent)
         {
+            if (qbittorrentFallbackClient.IsEnabledAndConfigured())
+            {
+                await qbittorrentFallbackClient.Pause(hash);
+            }
+
+            return;
+        }
+
+        if (Torrents.IsQbittorrentFallback(torrent))
+        {
+            await qbittorrentFallbackClient.Pause(hash);
+
             return;
         }
 
@@ -814,6 +916,18 @@ public class QBittorrent(ILogger<QBittorrent> logger, ISettings settings, Authen
 
         if (torrent == null || torrent.Type != DownloadType.Torrent)
         {
+            if (qbittorrentFallbackClient.IsEnabledAndConfigured())
+            {
+                await qbittorrentFallbackClient.Resume(hash);
+            }
+
+            return;
+        }
+
+        if (Torrents.IsQbittorrentFallback(torrent))
+        {
+            await qbittorrentFallbackClient.Resume(hash);
+
             return;
         }
 
@@ -834,7 +948,7 @@ public class QBittorrent(ILogger<QBittorrent> logger, ISettings settings, Authen
 
         var categories = await TorrentsCategories();
 
-        var activeDownloads = runnerState.ActiveDownloadClients.Sum(m => m.Value.Speed);
+        var activeDownloads = torrentInfo.Sum(m => m.Dlspeed ?? 0);
 
         return new()
         {

@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Caching.Memory;
 using Moq;
 using RdtClient.Data.Data;
 using RdtClient.Data.Enums;
@@ -44,6 +45,8 @@ public class TorrentRunnerTest
                        });
 
         var torrents = new Torrents(Mock.Of<ILogger<Torrents>>(),
+                                    Mock.Of<IHttpClientFactory>(),
+                                    new MemoryCache(new MemoryCacheOptions()),
                                     torrentDataMock.Object,
                                     Mock.Of<IDownloads>(),
                                     null!,
@@ -55,7 +58,8 @@ public class TorrentRunnerTest
                                     null!,
                                     null!,
                                     testSettings,
-                                    runnerState);
+                                    runnerState,
+                                    new QbittorrentFallbackClient(Mock.Of<ILogger<QbittorrentFallbackClient>>()));
 
         var torrentRunner = new TorrentRunner(Mock.Of<ILogger<TorrentRunner>>(),
                                               torrents,
