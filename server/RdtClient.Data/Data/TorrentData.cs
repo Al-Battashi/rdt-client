@@ -13,9 +13,9 @@ public class TorrentData(DataContext dataContext, ILogger<TorrentData>? logger =
                                         .AsNoTracking()
                                         .AsSplitQuery()
                                         .Include(m => m.Downloads)
-                                        .OrderBy(m => m.Priority ?? 9999)
                                         .ToListAsync();
 
+        // SQLite cannot translate DateTimeOffset ordering reliably, so keep ordering client-side.
         return torrents.OrderBy(m => m.Priority ?? 9999)
                        .ThenBy(m => m.Added)
                        .ToList();
