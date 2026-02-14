@@ -45,6 +45,33 @@ public class QbittorrentFallbackClient(ILogger<QbittorrentFallbackClient> logger
         return IsFallbackId(torrent.RdId) || String.Equals(torrent.RdStatusRaw, FallbackStatusRaw, StringComparison.OrdinalIgnoreCase);
     }
 
+    public async Task<String> TestConnection(String? url,
+                                             String? username,
+                                             String? password,
+                                             Boolean ignoreTlsErrors,
+                                             Int32 timeout,
+                                             CancellationToken cancellationToken = default)
+    {
+        if (!TryGetConfiguration(url, username, password, ignoreTlsErrors, timeout, out var settings, out var validationError))
+        {
+            throw new(validationError ?? "qBittorrent fallback settings are invalid.");
+        }
+
+        using var client = await CreateAuthenticatedClient(settings, cancellationToken);
+        var response = await client.GetAsync("api/v2/app/version", cancellationToken);
+
+        await EnsureSuccess(response, "api/v2/app/version", cancellationToken);
+
+        var version = (await response.Content.ReadAsStringAsync(cancellationToken)).Trim();
+
+        if (String.IsNullOrWhiteSpace(version))
+        {
+            throw new("qBittorrent returned an empty version response.");
+        }
+
+        return version;
+    }
+
     public async Task AddMagnet(String magnetLink, String? category, Int32? priority, CancellationToken cancellationToken = default)
     {
         using var client = await CreateAuthenticatedClient(cancellationToken);
@@ -64,7 +91,16 @@ public class QbittorrentFallbackClient(ILogger<QbittorrentFallbackClient> logger
             formData.Add(new("priority", priority.Value.ToString(CultureInfo.InvariantCulture)));
         }
 
-        await SendForm(client, "api/v2/torrents/add", formData, cancellationToken);
+        using var request = new FormUrlEncodedContent(formData);
+        var response = await client.PostAsync("api/v2/torrents/add", request, cancellationToken);
+        await EnsureSuccess(response, "api/v2/torrents/add", cancellationToken);
+
+        var responseBody = await response.Content.ReadAsStringAsync(cancellationToken);
+
+        if (responseBody.Contains("Fails", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new($"qBittorrent rejected add magnet request: {responseBody}");
+        }
     }
 
     public async Task AddFile(Byte[] fileBytes, String? category, Int32? priority, CancellationToken cancellationToken = default)
@@ -87,6 +123,13 @@ public class QbittorrentFallbackClient(ILogger<QbittorrentFallbackClient> logger
 
         var response = await client.PostAsync("api/v2/torrents/add", formData, cancellationToken);
         await EnsureSuccess(response, "api/v2/torrents/add", cancellationToken);
+
+        var responseBody = await response.Content.ReadAsStringAsync(cancellationToken);
+
+        if (responseBody.Contains("Fails", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new($"qBittorrent rejected add file request: {responseBody}");
+        }
     }
 
     public async Task<IList<TorrentInfo>> GetTorrents(CancellationToken cancellationToken = default)
@@ -256,6 +299,11 @@ public class QbittorrentFallbackClient(ILogger<QbittorrentFallbackClient> logger
             throw new(validationError ?? "qBittorrent fallback is not configured.");
         }
 
+        return await CreateAuthenticatedClient(settings, cancellationToken);
+    }
+
+    private async Task<HttpClient> CreateAuthenticatedClient(QbittorrentFallbackConfiguration settings, CancellationToken cancellationToken)
+    {
         var handler = new HttpClientHandler
         {
             CookieContainer = new CookieContainer(),
@@ -276,6 +324,8 @@ public class QbittorrentFallbackClient(ILogger<QbittorrentFallbackClient> logger
         };
 
         client.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", "rdt-client qbt-fallback");
+        client.DefaultRequestHeaders.TryAddWithoutValidation("Origin", $"{settings.BaseUri.Scheme}://{settings.BaseUri.Authority}");
+        client.DefaultRequestHeaders.Referrer = settings.BaseUri;
 
         await Login(client, settings, cancellationToken);
 
@@ -293,9 +343,19 @@ public class QbittorrentFallbackClient(ILogger<QbittorrentFallbackClient> logger
         var response = await client.PostAsync("api/v2/auth/login", formData, cancellationToken);
         var responseText = await response.Content.ReadAsStringAsync(cancellationToken);
 
-        if (!response.IsSuccessStatusCode || !responseText.Contains("Ok.", StringComparison.OrdinalIgnoreCase))
+        if (!response.IsSuccessStatusCode)
         {
             throw new($"Unable to authenticate qBittorrent fallback user. Status: {(Int32)response.StatusCode}. Message: {responseText}");
+        }
+
+        if (responseText.Contains("Fails", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new($"Unable to authenticate qBittorrent fallback user. Status: {(Int32)response.StatusCode}. Message: {responseText}");
+        }
+
+        if (!String.IsNullOrWhiteSpace(responseText) && !responseText.Contains("Ok", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new($"Unexpected qBittorrent login response. Status: {(Int32)response.StatusCode}. Message: {responseText}");
         }
     }
 
@@ -517,28 +577,42 @@ public class QbittorrentFallbackClient(ILogger<QbittorrentFallbackClient> logger
             return false;
         }
 
-        if (String.IsNullOrWhiteSpace(fallback.Url))
+        return TryGetConfiguration(fallback.Url, fallback.Username, fallback.Password, fallback.IgnoreTlsErrors, fallback.Timeout, out settings, out validationError);
+    }
+
+    private static Boolean TryGetConfiguration(String? url,
+                                               String? username,
+                                               String? password,
+                                               Boolean ignoreTlsErrors,
+                                               Int32 timeout,
+                                               out QbittorrentFallbackConfiguration settings,
+                                               out String? validationError)
+    {
+        settings = default!;
+        validationError = null;
+
+        if (String.IsNullOrWhiteSpace(url))
         {
             validationError = "qBittorrent fallback URL is not configured.";
 
             return false;
         }
 
-        if (!TryBuildBaseUri(fallback.Url, out var baseUri))
+        if (!TryBuildBaseUri(url, out var baseUri))
         {
             validationError = "qBittorrent fallback URL is invalid.";
 
             return false;
         }
 
-        if (String.IsNullOrWhiteSpace(fallback.Username) || String.IsNullOrWhiteSpace(fallback.Password))
+        if (String.IsNullOrWhiteSpace(username) || String.IsNullOrWhiteSpace(password))
         {
             validationError = "qBittorrent fallback credentials are not configured.";
 
             return false;
         }
 
-        settings = new(baseUri, fallback.Username.Trim(), fallback.Password, fallback.IgnoreTlsErrors, fallback.Timeout);
+        settings = new(baseUri, username.Trim(), password, ignoreTlsErrors, timeout);
 
         return true;
     }

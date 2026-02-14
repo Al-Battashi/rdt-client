@@ -334,14 +334,14 @@ public class Torrents(
 
         if (!qbittorrentFallbackClient.IsEnabledAndConfigured())
         {
-            logger.LogWarning("qBittorrent fallback was not attempted because the fallback client is not configured {torrentInfo}", torrent.ToLog());
+            logger.LogError("qBittorrent fallback was not attempted because the fallback client is not configured {torrentInfo}", torrent.ToLog());
 
             return false;
         }
 
         if (String.IsNullOrWhiteSpace(torrent.FileOrMagnet))
         {
-            logger.LogWarning("Cannot use qBittorrent fallback because the torrent payload is missing {torrentInfo}", torrent.ToLog());
+            logger.LogError("Cannot use qBittorrent fallback because the torrent payload is missing {torrentInfo}", torrent.ToLog());
 
             return false;
         }
@@ -379,7 +379,7 @@ public class Torrents(
         }
         catch (Exception fallbackException)
         {
-            logger.LogWarning(fallbackException, "qBittorrent fallback failed {torrentInfo}", torrent.ToLog());
+            logger.LogError(fallbackException, "qBittorrent fallback failed {torrentInfo}", torrent.ToLog());
 
             return false;
         }

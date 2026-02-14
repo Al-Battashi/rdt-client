@@ -75,6 +75,27 @@
             </div>
           }
         }
+        @if (setting.key === "Integrations:QbittorrentFallback:Password") {
+          <button
+            class="button is-warning"
+            (click)="testQbittorrentFallbackConnection()"
+            [disabled]="saving"
+            [ngClass]="{ 'is-loading': saving }"
+          >
+            Test qBittorrent fallback connection
+          </button>
+          @if (testQbittorrentFallbackConnectionError) {
+            <div class="notification is-danger is-light" style="margin-top: 1rem">
+              Could not connect to qBittorrent fallback<br />
+              {{ testQbittorrentFallbackConnectionError }}
+            </div>
+          }
+          @if (testQbittorrentFallbackConnectionSuccess) {
+            <div class="notification is-success is-light" style="margin-top: 1rem">
+              Found qBittorrent version {{ testQbittorrentFallbackConnectionSuccess }}
+            </div>
+          }
+        }
       </div>
     }
   </div>

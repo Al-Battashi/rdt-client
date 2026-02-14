@@ -49,4 +49,20 @@ export class SettingsService {
       secret,
     });
   }
+
+  public testQbittorrentFallbackConnection(
+    url: string,
+    username: string,
+    password: string,
+    ignoreTlsErrors: boolean,
+    timeout: number,
+  ): Observable<{ version: string }> {
+    return this.http.post<{ version: string }>(`${this.baseHref}Api/Settings/TestQbittorrentFallbackConnection`, {
+      url,
+      username,
+      password,
+      ignoreTlsErrors,
+      timeout,
+    });
+  }
 }

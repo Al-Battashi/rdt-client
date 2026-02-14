@@ -353,7 +353,9 @@ public class TorrentRunner(ILogger<TorrentRunner> logger, Torrents torrents, Dow
                 }
                 catch (Exception ex)
                 {
-                    if (await torrents.TryFallbackToQbittorrent(torrent, ex))
+                    var fallbackSucceeded = await torrents.TryFallbackToQbittorrent(torrent, ex);
+
+                    if (fallbackSucceeded)
                     {
                         logger.LogWarning(ex, "Provider add failed, sent torrent {torrentId} to qBittorrent fallback", torrent.TorrentId);
 
@@ -361,6 +363,14 @@ public class TorrentRunner(ILogger<TorrentRunner> logger, Torrents torrents, Dow
                     }
 
                     await torrents.UpdateComplete(torrent.TorrentId, $"Could not add to provider: {ex.Message}", DateTimeOffset.Now, true);
+
+                    if (ex.Message.Contains("Infringing file", StringComparison.OrdinalIgnoreCase))
+                    {
+                        logger.LogError(ex,
+                                        "Provider add failed with infringing-file response and qBittorrent fallback did not complete for torrent {torrentId}",
+                                        torrent.TorrentId);
+                    }
+
                     logger.LogWarning(ex, "Could not dequeue torrent {torrentId}", torrent.TorrentId);
                 }
             }

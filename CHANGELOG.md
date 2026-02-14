@@ -6,6 +6,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.124] - 2026-02-14
+### Added
+- Added a Settings button to test qBittorrent fallback connection and return detected qBittorrent version.
+
+### Fixed
+- Fixed qBittorrent fallback compatibility with WebUI instances that require `Origin`/`Referer` headers.
+- Fixed qBittorrent fallback login handling for WebUI versions that return `204` on successful authentication.
+- Added stronger fallback failure logging at `Error` level so issues are visible with default log settings.
+
 ## [2.0.123] - 2026-02-14
 ### Fixed
 - Improved qBittorrent fallback reliability for Real-Debrid "Infringing file" errors by inspecting nested exceptions.

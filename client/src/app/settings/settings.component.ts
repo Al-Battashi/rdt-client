@@ -32,6 +32,8 @@ export class SettingsComponent implements OnInit {
 
   public testAria2cConnectionError: string = null;
   public testAria2cConnectionSuccess: string = null;
+  public testQbittorrentFallbackConnectionError: string = null;
+  public testQbittorrentFallbackConnectionSuccess: string = null;
 
   public canRegisterMagnetHandler = false;
 
@@ -145,6 +147,53 @@ export class SettingsComponent implements OnInit {
         this.saving = false;
       },
     });
+  }
+
+  public testQbittorrentFallbackConnection(): void {
+    const settingQbittorrentFallbackUrl = this.getSettingValue<string>('Integrations:QbittorrentFallback:Url') ?? '';
+    const settingQbittorrentFallbackUsername =
+      this.getSettingValue<string>('Integrations:QbittorrentFallback:Username') ?? '';
+    const settingQbittorrentFallbackPassword =
+      this.getSettingValue<string>('Integrations:QbittorrentFallback:Password') ?? '';
+    const settingQbittorrentFallbackIgnoreTlsErrors =
+      this.getSettingValue<boolean>('Integrations:QbittorrentFallback:IgnoreTlsErrors') === true;
+    const settingQbittorrentFallbackTimeout =
+      Number(this.getSettingValue<number>('Integrations:QbittorrentFallback:Timeout')) || 15;
+
+    this.saving = true;
+    this.testQbittorrentFallbackConnectionError = null;
+    this.testQbittorrentFallbackConnectionSuccess = null;
+
+    this.settingsService
+      .testQbittorrentFallbackConnection(
+        settingQbittorrentFallbackUrl,
+        settingQbittorrentFallbackUsername,
+        settingQbittorrentFallbackPassword,
+        settingQbittorrentFallbackIgnoreTlsErrors,
+        settingQbittorrentFallbackTimeout,
+      )
+      .subscribe({
+        next: (result) => {
+          this.saving = false;
+          this.testQbittorrentFallbackConnectionSuccess = result.version;
+        },
+        error: (err) => {
+          this.testQbittorrentFallbackConnectionError = err.error;
+          this.saving = false;
+        },
+      });
+  }
+
+  private getSettingValue<T>(key: string): T | null {
+    for (const tab of this.tabs) {
+      const setting = tab.settings?.find((m) => m.key === key);
+
+      if (setting) {
+        return setting.value as T;
+      }
+    }
+
+    return null;
   }
 
   public registerMagnetHandler(): void {
