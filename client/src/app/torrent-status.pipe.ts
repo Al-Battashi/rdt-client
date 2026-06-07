@@ -144,7 +144,7 @@ export function getTorrentStatus(torrent: Torrent): string {
     case RealDebridStatus.WaitingForFileSelection:
       return 'Waiting for provider file selection';
     case RealDebridStatus.Error:
-      return `${prefix} error: ${torrent.rdStatusRaw}`;
+      return `${torrent.rdHost === 'qBittorrent' ? 'Torrent client' : 'Provider'} error: ${torrent.rdStatusRaw}`;
     case RealDebridStatus.Finished:
       if (torrent.rdHost === 'qBittorrent') {
         return 'Torrent client download complete';

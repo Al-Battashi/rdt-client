@@ -1,6 +1,8 @@
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 using Moq;
 using System.Text.Json;
+using RdtClient.Data.Data;
 using RdtClient.Data.Enums;
 using RdtClient.Data.Models.Data;
 using RdtClient.Data.Models.DebridClient;
@@ -22,10 +24,26 @@ public class QBittorrentTest
         _loggerMock = new();
         _settings = new();
         _runnerState = new();
-        _torrentsMock = new(null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, _settings, _runnerState);
+        var fallbackClient = new QbittorrentFallbackClient(Mock.Of<ILogger<QbittorrentFallbackClient>>());
+        _torrentsMock = new(Mock.Of<ILogger<Torrents>>(),
+                            Mock.Of<IHttpClientFactory>(),
+                            new MemoryCache(new MemoryCacheOptions()),
+                            Mock.Of<ITorrentData>(),
+                            Mock.Of<IDownloads>(),
+                            null!,
+                            null!,
+                            null!,
+                            null!,
+                            null!,
+                            null!,
+                            null!,
+                            null!,
+                            _settings,
+                            _runnerState,
+                            fallbackClient);
         _authenticationMock = new(null!, null!, null!);
 
-        _qBittorrent = new(_loggerMock.Object, _settings, _authenticationMock.Object, _torrentsMock.Object, null!, _runnerState);
+        _qBittorrent = new(_loggerMock.Object, _settings, _authenticationMock.Object, _torrentsMock.Object, null!, _runnerState, fallbackClient);
     }
 
     [Fact]

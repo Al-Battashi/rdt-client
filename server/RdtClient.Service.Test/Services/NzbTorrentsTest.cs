@@ -1,8 +1,11 @@
 using System.IO.Abstractions.TestingHelpers;
 using System.Text;
+using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Logging;
 using Moq;
 using RdtClient.Data.Enums;
 using RdtClient.Data.Models.Data;
+using QbittorrentFallbackClient = RdtClient.Service.Services.QbittorrentFallbackClient;
 using TorrentRunnerState = RdtClient.Service.Services.TorrentRunnerState;
 using TorrentsService = RdtClient.Service.Services.Torrents;
 
@@ -20,6 +23,8 @@ public class NzbTorrentsTest
         _fileSystem = new();
 
         _torrents = new(_mocks.TorrentsLoggerMock.Object,
+                        Mock.Of<IHttpClientFactory>(),
+                        new MemoryCache(new MemoryCacheOptions()),
                         _mocks.TorrentDataMock.Object,
                         _mocks.DownloadsMock.Object,
                         _mocks.ProcessFactoryMock.Object,
@@ -31,7 +36,8 @@ public class NzbTorrentsTest
                         null!,
                         null!,
                         new TestSettings(),
-                        new TorrentRunnerState());
+                        new TorrentRunnerState(),
+                        new QbittorrentFallbackClient(Mock.Of<ILogger<QbittorrentFallbackClient>>()));
     }
 
     [Fact]

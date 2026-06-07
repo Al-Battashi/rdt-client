@@ -21,7 +21,7 @@ public class SabnzbdTest
     public SabnzbdTest()
     {
         _settings = new();
-        _torrentsMock = new(null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, _settings, new TorrentRunnerState());
+        _torrentsMock = new(null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, _settings, new TorrentRunnerState(), new QbittorrentFallbackClient(Mock.Of<ILogger<QbittorrentFallbackClient>>()));
         _torrentsMock.Setup(t => t.Get()).ReturnsAsync(new List<Torrent>());
     }
 

@@ -3,8 +3,8 @@ using RdtClient.Data.Models.Data;
 using RdtClient.Service.Helpers;
 using RdtClient.Service.Services.DebridClients;
 using SharpCompress.Archives;
-using SharpCompress.Archives.Rar;
-using SharpCompress.Archives.Zip;
+using SharpCompress.Common;
+using SharpCompress.Readers;
 
 namespace RdtClient.Service.Services;
 
@@ -118,31 +118,17 @@ public class UnpackClient(Download download, String destinationPath)
         }
     }
 
-    private static async Task<IList<String>> GetArchiveFiles(String filePath)
+    private static Task<IList<String>> GetArchiveFiles(String filePath)
     {
-        await using Stream stream = File.OpenRead(filePath);
-
-        var extension = Path.GetExtension(filePath);
-
-        IArchive archive;
-
-        if (extension == ".zip")
-        {
-            archive = ZipArchive.Open(stream);
-        }
-        else
-        {
-            archive = RarArchive.Open(stream);
-        }
+        using Stream stream = File.OpenRead(filePath);
+        using var archive = ArchiveFactory.OpenArchive(stream, new ReaderOptions());
 
         var entries = archive.Entries
                              .Where(entry => !entry.IsDirectory)
                              .Select(m => m.Key!)
                              .ToList();
 
-        archive.Dispose();
-
-        return entries;
+        return Task.FromResult<IList<String>>(entries);
     }
 
     private void Extract(String filePath, String extractPath, CancellationToken cancellationToken)
@@ -151,28 +137,32 @@ public class UnpackClient(Download download, String destinationPath)
 
         var fi = parts.Select(m => new FileInfo(m));
 
-        var extension = Path.GetExtension(filePath);
+        using var archive = ArchiveFactory.OpenArchive(fi, new ReaderOptions());
 
-        IArchive archive;
+        archive.WriteToDirectory(extractPath,
+                                 new ExtractionOptions
+                                 {
+                                     ExtractFullPath = true,
+                                     Overwrite = true
+                                 },
+                                 new ExtractionProgress(progress =>
+                                 {
+                                     cancellationToken.ThrowIfCancellationRequested();
 
-        if (extension == ".zip")
-        {
-            archive = ZipArchive.Open(fi);
-        }
-        else
-        {
-            archive = RarArchive.Open(fi);
-        }
-
-        archive.ExtractToDirectory(extractPath,
-                                   d =>
-                                   {
-                                       Progess = (Int32)Math.Round(d);
-                                   },
-                                   cancellationToken);
-
-        archive.Dispose();
+                                     if (progress.PercentComplete.HasValue)
+                                     {
+                                         Progess = (Int32)Math.Round(progress.PercentComplete.Value);
+                                     }
+                                 }));
 
         GC.Collect();
+    }
+
+    private sealed class ExtractionProgress(Action<ProgressReport> handler) : IProgress<ProgressReport>
+    {
+        public void Report(ProgressReport value)
+        {
+            handler(value);
+        }
     }
 }
