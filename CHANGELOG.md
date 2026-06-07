@@ -58,6 +58,105 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Added optional qBittorrent WebUI fallback for *arr/qB integrations when Real-Debrid rejects provider add requests (for example, infringing file responses), while keeping the same rdt-client API surface.
 
+## [2.0.138] - 2026-06-05
+### Fixed
+- SABnzbd fixes.
+
+## [2.0.137] - 2026-06-05
+### Fixed
+- Fix torbox save path mapping for single file downloads.
+
+## [2.0.136] - 2026-05-30
+### Added
+- Added devcontainer development workflow.
+
+### Changed
+- Upgraded torbox.net dependency.
+
+## [2.0.135] - 2026-05-27
+### Changed
+- When adding a torrent through the qBittorrent endpoints, it will wait to see if the torrent gets added properly or errors out, resulting in a better experience for infringing files and Sonarr / Radarr.
+- Upgraded torbox.net dependency. 
+- Support SABnzbd API key auth, thanks to @ALenfant!
+
+## [2.0.134] - 2026-05-22
+### Changed
+- Upgraded torbox.net dependency. 
+
+## [2.0.133] - 2026-05-17
+### Added
+- Added NZB support for Premiumize, thanks to @ALenfant!
+
+## [2.0.132] - 2026-05-17
+### Changed
+- Fixed for Cleanuparr
+- Upgrade Torbox.NET dependency
+
+## [2.0.131] - 2026-05-14
+### Changed
+- Fixes to the rate limiting.
+
+## [2.0.130] - 2026-04-28
+### Changed
+- Fixes to unit tests
+- Upgraded .NET and Angular dependencies
+- Added better qBittorrent capabilities for Cleanuparr
+- Performance fixes
+
+## [2.0.129] - 2026-04-06
+### Added
+- Optimized mobile views, thanks to @sylvaindd!
+
+## [2.0.128] - 2026-04-06
+### Changed
+- Fixed some qBittorrent endpoints.
+
+## [2.0.127] - 2026-03-15
+### Added
+- Implement qBittorrent endpoint for counting torrents, thanks to @vinodmishra!
+
+## [2.0.126] - 2026-03-14
+### Added
+- qBittorrent hash filtering on the /torrrents/info endpoint, thanks to @jfrconley!
+- Category select as a dropdown when adding a new torrent, thanks to @sylvaindd!
+
+### Changed
+- Rate limiting fixes, thanks to @omgbeez!
+- AllDebrid Symlink fixes, thanks to @AlexandreVassard!
+
+## [2.0.125] - 2026-03-01
+### Added
+- Added extra qBittorrent endpoints for Cleanuparr compatibility.
+
+## [2.0.124] - 2026-02-23
+### Added
+- Added /version/api for qBittorrent to support clients that still want to talk to the old API.
+- Improved rate limiting handling.
+
+## [2.0.123] - 2026-02-21
+### Changed
+- Reverted SharpCompress to 0.42.1 due to file locking issues.
+
+## [2.0.122] - 2026-02-21
+### Added
+- Sort torrents by added date by default, remember sort order in the browser.
+
+### Changed
+- Fixed ETA calculations.
+- Fixed Torrentbox statuses.
+- Fixed download progress reports.
+- Fixed NZB delete actions.
+
+## [2.0.121] - 2026-02-18
+### Added
+- NZB/Usernet support thanks to @omgbeez!
+
+### Changed
+- Make some qBittorrent endpoints accessible without authentication.
+- Improved ETA calculations.
+- Few performance improvements when the download page has a lot of torrents.
+- Performance improvements for the sqlite connection.
+
 ## [2.0.120] - 2026-02-11
 ### Changed
 - Upgrade to .NET 10.

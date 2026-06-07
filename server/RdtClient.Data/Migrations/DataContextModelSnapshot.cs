@@ -15,7 +15,7 @@ namespace RdtClient.Data.Migrations
         protected override void BuildModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
-            modelBuilder.HasAnnotation("ProductVersion", "9.0.9");
+            modelBuilder.HasAnnotation("ProductVersion", "10.0.5");
 
             modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityRole", b =>
                 {
@@ -263,7 +263,8 @@ namespace RdtClient.Data.Migrations
 
                     b.HasKey("DownloadId");
 
-                    b.HasIndex("TorrentId");
+                    b.HasIndex("TorrentId", "Path")
+                        .IsUnique();
 
                     b.ToTable("Downloads");
                 });
@@ -400,6 +401,9 @@ namespace RdtClient.Data.Migrations
                         .HasColumnType("INTEGER");
 
                     b.Property<int>("TorrentRetryAttempts")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("Type")
                         .HasColumnType("INTEGER");
 
                     b.HasKey("TorrentId");

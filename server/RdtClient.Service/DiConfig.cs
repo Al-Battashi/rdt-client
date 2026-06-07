@@ -4,11 +4,13 @@ using System.Reflection;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.Extensions.DependencyInjection;
 using Polly;
-using Polly.Extensions.Http;
+using Polly.Timeout;
+using RateLimitHeaders.Polly;
 using RdtClient.Service.BackgroundServices;
+using RdtClient.Service.Helpers;
 using RdtClient.Service.Middleware;
 using RdtClient.Service.Services;
-using RdtClient.Service.Services.TorrentClients;
+using RdtClient.Service.Services.DebridClients;
 using RdtClient.Service.Wrappers;
 
 namespace RdtClient.Service;
@@ -16,6 +18,8 @@ namespace RdtClient.Service;
 public static class DiConfig
 {
     public const String RD_CLIENT = "RdClient";
+    public const String TORBOX_CLIENT = "TorBoxClient";
+    public const String TORBOX_CLIENT_SLOW = "TorBoxClientSlow";
     public static readonly String UserAgent = $"rdt-client {Assembly.GetEntryAssembly()?.GetName().Version}";
 
     public static void RegisterRdtServices(this IServiceCollection services)
@@ -23,20 +27,24 @@ public static class DiConfig
         services.AddMemoryCache();
 
         services.AddSingleton<IAllDebridNetClientFactory, AllDebridNetClientFactory>();
-        services.AddScoped<AllDebridTorrentClient>();
+        services.AddScoped<AllDebridDebridClient>();
 
+        services.AddSingleton<IRateLimitCoordinator, RateLimitCoordinator>();
+        services.AddSingleton(TorrentRunner.SharedState);
         services.AddSingleton<IProcessFactory, ProcessFactory>();
         services.AddSingleton<IFileSystem, FileSystem>();
 
         services.AddScoped<Authentication>();
         services.AddScoped<IDownloads, Downloads>();
         services.AddScoped<Downloads>();
-        services.AddScoped<PremiumizeTorrentClient>();
+        services.AddScoped<PremiumizeDebridClient>();
         services.AddScoped<QBittorrent>();
+        services.AddScoped<Sabnzbd>();
         services.AddScoped<RemoteService>();
-        services.AddScoped<RealDebridTorrentClient>();
-        services.AddScoped<Settings>();
-        services.AddScoped<TorBoxTorrentClient>();
+        services.AddScoped<RealDebridDebridClient>();
+        services.AddSingleton<Settings>();
+        services.AddSingleton<ISettings>(serviceProvider => serviceProvider.GetRequiredService<Settings>());
+        services.AddScoped<TorBoxDebridClient>();
         services.AddScoped<Torrents>();
         services.AddScoped<TorrentRunner>();
         services.AddScoped<DebridLinkClient>();
@@ -46,7 +54,8 @@ public static class DiConfig
         services.AddSingleton<ITrackerListGrabber, TrackerListGrabber>();
         services.AddSingleton<IEnricher, Enricher>();
 
-        services.AddSingleton<IAuthorizationHandler, AuthSettingHandler>();
+        services.AddScoped<IAuthorizationHandler, AuthSettingHandler>();
+        services.AddScoped<IAuthorizationHandler, SabnzbdHandler>();
 
         services.AddHostedService<DiskSpaceMonitor>();
         services.AddHostedService<ProviderUpdater>();
@@ -59,11 +68,6 @@ public static class DiConfig
 
     public static void RegisterHttpClients(this IServiceCollection services)
     {
-        var retryPolicy = HttpPolicyExtensions
-                          .HandleTransientHttpError()
-                          .OrResult(r => r.StatusCode == HttpStatusCode.TooManyRequests)
-                          .WaitAndRetryAsync(5, attempt => TimeSpan.FromSeconds(Math.Pow(2, attempt)));
-
         services.AddHttpClient();
 
         services.ConfigureHttpClientDefaults(builder =>
@@ -74,7 +78,64 @@ public static class DiConfig
             });
         });
 
+        services.AddTransient<RateLimitHandler>();
+
         services.AddHttpClient(RD_CLIENT)
-                .AddPolicyHandler(retryPolicy);
+                .AddHttpMessageHandler<RateLimitHandler>()
+                .AddResilienceHandler("rd_client_handler", ConfigureResiliencePipeline);
+
+        // This likely works for most providers, but should be verified and then the providers changed
+        // to this HTTP client for added resilience.
+        services.AddHttpClient(TORBOX_CLIENT)
+                .AddResilienceHandler("torbox_client_handler", ConfigureResiliencePipeline);
+
+        services.AddHttpClient(TORBOX_CLIENT_SLOW)
+                .AddHttpMessageHandler<RateLimitHandler>()
+                .AddResilienceHandler("torbox_client_handler_slow", ConfigureResiliencePipeline);
+    }
+
+    private static void ConfigureResiliencePipeline(ResiliencePipelineBuilder<HttpResponseMessage> builder)
+    {
+        builder.AddRateLimitHeaders(options =>
+        {
+            options.EnableProactiveThrottling = true;
+        });
+
+        builder.AddRetry(new()
+        {
+            ShouldHandle = args => args.Outcome switch
+            {
+                { Exception: HttpRequestException } => PredicateResult.True(),
+                { Result.StatusCode: HttpStatusCode.RequestTimeout } => PredicateResult.True(),
+                { Result.StatusCode: HttpStatusCode.TooManyRequests } => PredicateResult.True(),
+                _ => PredicateResult.False()
+            },
+            MaxRetryAttempts = 2,
+            BackoffType = DelayBackoffType.Exponential,
+            Delay = TimeSpan.FromSeconds(2),
+            UseJitter = true,
+            DelayGenerator = args =>
+            {
+                if (args.Outcome.Result is { StatusCode: HttpStatusCode.TooManyRequests } response)
+                {
+                    var delay = RateLimitHandler.GetRetryAfterDelay(response);
+                    var timeout = TimeSpan.FromSeconds(Settings.Get.Provider.Timeout);
+
+                    if (delay >= timeout)
+                    {
+                        return new((TimeSpan?)null);
+                    }
+
+                    return new(delay);
+                }
+
+                return new((TimeSpan?)null);
+            }
+        });
+
+        builder.AddTimeout(new TimeoutStrategyOptions
+        {
+            TimeoutGenerator = _ => new(TimeSpan.FromSeconds(Settings.Get.Provider.Timeout))
+        });
     }
 }

@@ -1,10 +1,11 @@
-﻿using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using RdtClient.Data.Enums;
 using RdtClient.Data.Models.Data;
 
 namespace RdtClient.Data.Data;
 
-public class TorrentData(DataContext dataContext) : ITorrentData
+public class TorrentData(DataContext dataContext, ILogger<TorrentData>? logger = null) : ITorrentData
 {
     public async Task<IList<Torrent>> Get()
     {
@@ -14,8 +15,7 @@ public class TorrentData(DataContext dataContext) : ITorrentData
                                         .Include(m => m.Downloads)
                                         .ToListAsync();
 
-        // SQLite does not support ORDER BY for DateTimeOffset expressions in EF translation.
-        // Apply ordering in-memory to keep deterministic processing order.
+        // SQLite cannot translate DateTimeOffset ordering reliably, so keep ordering client-side.
         return torrents.OrderBy(m => m.Priority ?? 9999)
                        .ThenBy(m => m.Added)
                        .ToList();
@@ -67,6 +67,7 @@ public class TorrentData(DataContext dataContext) : ITorrentData
                                    String hash,
                                    String? fileOrMagnetContents,
                                    Boolean isFile,
+                                   DownloadType downloadType,
                                    DownloadClient downloadClient,
                                    Torrent torrent)
     {
@@ -86,6 +87,7 @@ public class TorrentData(DataContext dataContext) : ITorrentData
             ExcludeRegex = torrent.ExcludeRegex,
             DownloadManualFiles = torrent.DownloadManualFiles,
             DownloadClient = downloadClient,
+            Type = downloadType,
             FileOrMagnet = fileOrMagnetContents,
             IsFile = isFile,
             Priority = torrent.Priority,
@@ -139,6 +141,20 @@ public class TorrentData(DataContext dataContext) : ITorrentData
         }
 
         dbTorrent.RdId = rdId;
+
+        await dataContext.SaveChangesAsync();
+    }
+
+    public async Task UpdateHash(Torrent torrent, String hash)
+    {
+        var dbTorrent = await dataContext.Torrents.FirstOrDefaultAsync(m => m.TorrentId == torrent.TorrentId);
+
+        if (dbTorrent == null)
+        {
+            return;
+        }
+
+        dbTorrent.Hash = hash.ToLower();
 
         await dataContext.SaveChangesAsync();
     }
@@ -272,15 +288,23 @@ public class TorrentData(DataContext dataContext) : ITorrentData
 
     public async Task Delete(Guid torrentId)
     {
-        var dbTorrent = await dataContext.Torrents.FirstOrDefaultAsync(m => m.TorrentId == torrentId);
+        await using var transaction = await dataContext.Database.BeginTransactionAsync();
 
-        if (dbTorrent == null)
+        await dataContext.Downloads
+                         .Where(m => m.TorrentId == torrentId)
+                         .ExecuteDeleteAsync();
+
+        var deletedTorrents = await dataContext.Torrents
+                                               .Where(m => m.TorrentId == torrentId)
+                                               .ExecuteDeleteAsync();
+
+        await transaction.CommitAsync();
+
+        if (deletedTorrents == 0)
         {
+            logger?.LogDebug("Skipped torrent graph deletion because the torrent was not found. TorrentId: {torrentId}", torrentId);
+
             return;
         }
-
-        dataContext.Torrents.Remove(dbTorrent);
-
-        await dataContext.SaveChangesAsync();
     }
 }

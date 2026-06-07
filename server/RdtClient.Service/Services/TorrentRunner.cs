@@ -11,23 +11,40 @@ using RdtClient.Service.Services.Downloaders;
 
 namespace RdtClient.Service.Services;
 
-public class TorrentRunner(ILogger<TorrentRunner> logger, Torrents torrents, Downloads downloads)
+public class TorrentRunner(
+    ILogger<TorrentRunner> logger,
+    Torrents torrents,
+    Downloads downloads,
+    RemoteService remoteService,
+    IHttpClientFactory httpClientFactory,
+    IRateLimitCoordinator coordinator,
+    ISettings settings,
+    ITorrentRunnerState runnerState)
 {
-    public static readonly ConcurrentDictionary<Guid, DownloadClient> ActiveDownloadClients = new();
-    public static readonly ConcurrentDictionary<Guid, UnpackClient> ActiveUnpackClients = new();
+    public static readonly ITorrentRunnerState SharedState = new TorrentRunnerState();
 
-    private readonly HttpClient _httpClient = new()
+    public static ConcurrentDictionary<Guid, DownloadClient> ActiveDownloadClients => SharedState.ActiveDownloadClients;
+
+    public static ConcurrentDictionary<Guid, UnpackClient> ActiveUnpackClients => SharedState.ActiveUnpackClients;
+
+    private DateTimeOffset? _lastNextAllowedAt;
+
+    public static Boolean IsPausedForLowDiskSpace
     {
-        Timeout = TimeSpan.FromSeconds(10)
-    };
+        get => SharedState.IsPausedForLowDiskSpace;
+        set => SharedState.IsPausedForLowDiskSpace = value;
+    }
 
-    public static Boolean IsPausedForLowDiskSpace { get; set; }
+    public static (Int64 Speed, Int64 BytesTotal, Int64 BytesDone) GetStats(Guid downloadId)
+    {
+        return SharedState.GetStats(downloadId);
+    }
 
     public async Task Initialize()
     {
         Log("Initializing TorrentRunner");
 
-        var settingsCopy = JsonSerializer.Deserialize<DbSettings>(JsonSerializer.Serialize(Settings.Get));
+        var settingsCopy = JsonSerializer.Deserialize<DbSettings>(JsonSerializer.Serialize(settings.Current));
 
         if (settingsCopy != null)
         {
@@ -70,28 +87,28 @@ public class TorrentRunner(ILogger<TorrentRunner> logger, Torrents torrents, Dow
 
     public async Task Tick()
     {
-        if (String.IsNullOrWhiteSpace(Settings.Get.Provider.ApiKey))
+        if (String.IsNullOrWhiteSpace(settings.Current.Provider.ApiKey))
         {
             Log($"No RealDebridApiKey set in settings");
 
             return;
         }
 
-        var settingDownloadLimit = Settings.Get.General.DownloadLimit;
+        var settingDownloadLimit = settings.Current.General.DownloadLimit;
 
         if (settingDownloadLimit < 1)
         {
             settingDownloadLimit = 1;
         }
 
-        var settingUnpackLimit = Settings.Get.General.UnpackLimit;
+        var settingUnpackLimit = settings.Current.General.UnpackLimit;
 
         if (settingUnpackLimit < 0)
         {
             settingUnpackLimit = 0;
         }
 
-        var settingDownloadPath = Settings.Get.DownloadClient.DownloadPath;
+        var settingDownloadPath = settings.Current.DownloadClient.DownloadPath;
 
         if (String.IsNullOrWhiteSpace(settingDownloadPath))
         {
@@ -103,22 +120,46 @@ public class TorrentRunner(ILogger<TorrentRunner> logger, Torrents torrents, Dow
         var sw = new Stopwatch();
         sw.Start();
 
-        if (!ActiveDownloadClients.IsEmpty || !ActiveUnpackClients.IsEmpty)
+        var currentNextAllowedAt = coordinator.GetMaxNextAllowedAt();
+
+        if (currentNextAllowedAt != _lastNextAllowedAt)
         {
-            Log($"TorrentRunner Tick Start, {ActiveDownloadClients.Count} active downloads, {ActiveUnpackClients.Count} active unpacks");
+            if (currentNextAllowedAt == null || currentNextAllowedAt <= DateTimeOffset.UtcNow)
+            {
+                if (_lastNextAllowedAt > DateTimeOffset.UtcNow)
+                {
+                    Log("Rate-limit cooldown expired, resuming dequeuing");
+
+                    await remoteService.UpdateRateLimitStatus(new()
+                    {
+                        NextDequeueTime = null,
+                        SecondsRemaining = 0
+                    });
+                }
+            }
+
+            _lastNextAllowedAt = currentNextAllowedAt;
         }
 
-        if (ActiveDownloadClients.Any(m => m.Value.Type == Data.Enums.DownloadClient.Aria2c))
+        if (!runnerState.ActiveDownloadClients.IsEmpty || !runnerState.ActiveUnpackClients.IsEmpty)
+        {
+            Log($"TorrentRunner Tick Start, {runnerState.ActiveDownloadClients.Count} active downloads, {runnerState.ActiveUnpackClients.Count} active unpacks");
+        }
+
+        if (runnerState.ActiveDownloadClients.Any(m => m.Value.Type == Data.Enums.DownloadClient.Aria2c))
         {
             Log("Updating Aria2 status");
 
-            var aria2NetClient = new Aria2NetClient(Settings.Get.DownloadClient.Aria2cUrl, Settings.Get.DownloadClient.Aria2cSecret, _httpClient, 1);
+            var httpClient = httpClientFactory.CreateClient();
+            httpClient.Timeout = TimeSpan.FromSeconds(10);
+
+            var aria2NetClient = new Aria2NetClient(settings.Current.DownloadClient.Aria2cUrl, settings.Current.DownloadClient.Aria2cSecret, httpClient, 1);
 
             var allDownloads = await aria2NetClient.TellAllAsync();
 
             Log($"Found {allDownloads.Count} Aria2 downloads");
 
-            foreach (var activeDownload in ActiveDownloadClients)
+            foreach (var activeDownload in runnerState.ActiveDownloadClients)
             {
                 if (activeDownload.Value.Downloader is Aria2cDownloader aria2Downloader)
                 {
@@ -129,11 +170,11 @@ public class TorrentRunner(ILogger<TorrentRunner> logger, Torrents torrents, Dow
             Log("Finished updating Aria2 status");
         }
 
-        if (ActiveDownloadClients.Any(m => m.Value.Type == Data.Enums.DownloadClient.DownloadStation))
+        if (runnerState.ActiveDownloadClients.Any(m => m.Value.Type == Data.Enums.DownloadClient.DownloadStation))
         {
             Log("Updating DownloadStation status");
 
-            foreach (var activeDownload in ActiveDownloadClients)
+            foreach (var activeDownload in runnerState.ActiveDownloadClients)
             {
                 if (activeDownload.Value.Downloader is DownloadStationDownloader downloadStationDownloader)
                 {
@@ -143,7 +184,7 @@ public class TorrentRunner(ILogger<TorrentRunner> logger, Torrents torrents, Dow
         }
 
         // Check if any torrents are finished downloading to the host, remove them from the active download list.
-        var completedActiveDownloads = ActiveDownloadClients.Where(m => m.Value.Finished).ToList();
+        var completedActiveDownloads = runnerState.ActiveDownloadClients.Where(m => m.Value.Finished).ToList();
 
         if (completedActiveDownloads.Count > 0)
         {
@@ -155,7 +196,7 @@ public class TorrentRunner(ILogger<TorrentRunner> logger, Torrents torrents, Dow
 
                 if (download == null)
                 {
-                    ActiveDownloadClients.TryRemove(downloadId, out _);
+                    runnerState.ActiveDownloadClients.TryRemove(downloadId, out _);
 
                     Log($"Download with ID {downloadId} not found! Removed from download queue");
 
@@ -196,14 +237,14 @@ public class TorrentRunner(ILogger<TorrentRunner> logger, Torrents torrents, Dow
                     await downloads.UpdateUnpackingQueued(downloadId, DateTimeOffset.UtcNow);
                 }
 
-                ActiveDownloadClients.TryRemove(downloadId, out _);
+                runnerState.ActiveDownloadClients.TryRemove(downloadId, out _);
 
                 Log($"Removed from ActiveDownloadClients", download, download.Torrent);
             }
         }
 
         // Check if any torrents are finished unpacking, remove them from the active unpack list.
-        var completedUnpacks = ActiveUnpackClients.Where(m => m.Value.Finished).ToList();
+        var completedUnpacks = runnerState.ActiveUnpackClients.Where(m => m.Value.Finished).ToList();
 
         if (completedUnpacks.Count > 0)
         {
@@ -215,7 +256,7 @@ public class TorrentRunner(ILogger<TorrentRunner> logger, Torrents torrents, Dow
 
                 if (download == null)
                 {
-                    ActiveUnpackClients.TryRemove(downloadId, out _);
+                    runnerState.ActiveUnpackClients.TryRemove(downloadId, out _);
 
                     Log($"Download with ID {downloadId} not found! Removed from unpack queue");
 
@@ -237,36 +278,33 @@ public class TorrentRunner(ILogger<TorrentRunner> logger, Torrents torrents, Dow
 
                 await downloads.UpdateCompleted(downloadId, DateTimeOffset.UtcNow);
 
-                ActiveUnpackClients.TryRemove(downloadId, out _);
+                runnerState.ActiveUnpackClients.TryRemove(downloadId, out _);
 
                 Log($"Removed from ActiveUnpackClients", download, download.Torrent);
             }
         }
 
         var allTorrents = await torrents.Get();
+        var downloadsById = allTorrents.SelectMany(m => m.Downloads).ToDictionary(m => m.DownloadId, m => m);
 
         // Check for deleted torrents that are stuck in the ActiveDownloads or ActiveUnpacks
-        foreach (var activeDownload in ActiveDownloadClients)
+        foreach (var activeDownload in runnerState.ActiveDownloadClients)
         {
-            var download = allTorrents.SelectMany(m => m.Downloads).FirstOrDefault(m => m.DownloadId == activeDownload.Key);
-
-            if (download == null)
+            if (!downloadsById.ContainsKey(activeDownload.Key))
             {
                 await activeDownload.Value.Cancel();
-                ActiveDownloadClients.TryRemove(activeDownload.Key, out _);
+                runnerState.ActiveDownloadClients.TryRemove(activeDownload.Key, out _);
 
                 break;
             }
         }
 
-        foreach (var activeUnpacks in ActiveUnpackClients)
+        foreach (var activeUnpacks in runnerState.ActiveUnpackClients)
         {
-            var download = allTorrents.SelectMany(m => m.Downloads).FirstOrDefault(m => m.DownloadId == activeUnpacks.Key);
-
-            if (download == null)
+            if (!downloadsById.ContainsKey(activeUnpacks.Key))
             {
                 activeUnpacks.Value.Cancel();
-                ActiveUnpackClients.TryRemove(activeUnpacks.Key, out _);
+                runnerState.ActiveUnpackClients.TryRemove(activeUnpacks.Key, out _);
 
                 break;
             }
@@ -329,105 +367,120 @@ public class TorrentRunner(ILogger<TorrentRunner> logger, Torrents torrents, Dow
         }
 
         // Process torrents in DebridQueue
-        var torrentsToAddToProvider = allTorrents.Where(m => m.RdId == null && m.RdAdded == null && m.FileOrMagnet != null && m.RdStatus == TorrentStatus.Queued)
-                                                 .ToList();
+        var torrentsToAddToProvider = allTorrents
+                                      .Where(m => m.Completed == null && m.Error == null && m.RdId == null && m.RdAdded == null && m.FileOrMagnet != null &&
+                                                  m.RdStatus == TorrentStatus.Queued)
+                                      .ToList();
 
         if (torrentsToAddToProvider.Count != 0)
         {
-            var downloadingTorrentsCount = allTorrents.Where(m => !Torrents.IsQbittorrentFallback(m))
-                                                     .Count(m => m.RdStatus is not (TorrentStatus.Queued or TorrentStatus.Finished or TorrentStatus.Error));
+            var nextAllowedAt = coordinator.GetMaxNextAllowedAt();
 
-            var maxParallelDownloads = Settings.Get.Provider.MaxParallelDownloads;
-
-            logger.LogDebug("Currently downloading {downloadingTorrentCount}/{maxParallelDownloads} torrents, {queuedCount} queued.",
-                            downloadingTorrentsCount,
-                            maxParallelDownloads,
-                            torrentsToAddToProvider.Count);
-
-            var availabilityByTorrentId = new Dictionary<Guid, Boolean?>();
-            var sendNonCachedToQbittorrent = Settings.Get.Provider.Provider == Provider.RealDebrid &&
-                                             Settings.Get.Integrations.QbittorrentFallback.SendNonCachedToQbittorrent;
-
-            if (Settings.Get.Provider.Provider == Provider.RealDebrid &&
-                Settings.Get.Integrations.QbittorrentFallback.PrioritizeCachedTorrents)
+            if (nextAllowedAt > DateTimeOffset.UtcNow)
             {
-                var withAvailability = new List<(Torrent Torrent, Boolean? IsCached)>();
+                logger.LogDebug($"Dequeuing torrents is paused until {nextAllowedAt}, {nextAllowedAt - DateTimeOffset.Now} remaining");
+            }
+            else
+            {
+                var downloadingTorrentsCount = allTorrents.Where(m => !Torrents.IsQbittorrentFallback(m))
+                                                         .Count(m => m.RdStatus is not (TorrentStatus.Queued or TorrentStatus.Finished or TorrentStatus.Error));
+
+                var maxParallelDownloads = settings.Current.Provider.MaxParallelDownloads;
+
+                logger.LogDebug("Currently downloading {downloadingTorrentCount}/{maxParallelDownloads} torrents, {queuedCount} queued.",
+                                downloadingTorrentsCount,
+                                maxParallelDownloads,
+                                torrentsToAddToProvider.Count);
+
+                var availabilityByTorrentId = new Dictionary<Guid, Boolean?>();
+                var sendNonCachedToQbittorrent = settings.Current.Provider.Provider == Provider.RealDebrid &&
+                                                 settings.Current.Integrations.QbittorrentFallback.SendNonCachedToQbittorrent;
+
+                if (settings.Current.Provider.Provider == Provider.RealDebrid &&
+                    settings.Current.Integrations.QbittorrentFallback.PrioritizeCachedTorrents)
+                {
+                    var withAvailability = new List<(Torrent Torrent, Boolean? IsCached)>();
+
+                    foreach (var torrent in torrentsToAddToProvider)
+                    {
+                        var isCached = await torrents.IsProviderInstantlyAvailable(torrent);
+                        availabilityByTorrentId[torrent.TorrentId] = isCached;
+                        withAvailability.Add((torrent, isCached));
+                    }
+
+                    torrentsToAddToProvider = withAvailability.OrderBy(m => m.IsCached == false ? 1 : 0)
+                                                              .ThenBy(m => m.IsCached == null ? 1 : 0)
+                                                              .ThenBy(m => m.Torrent.Priority ?? Int32.MaxValue)
+                                                              .ThenBy(m => m.Torrent.Added)
+                                                              .Select(m => m.Torrent)
+                                                              .ToList();
+                }
+
+                var remainingProviderSlots = maxParallelDownloads == 0 ? Int32.MaxValue : Math.Max(maxParallelDownloads - downloadingTorrentsCount, 0);
 
                 foreach (var torrent in torrentsToAddToProvider)
                 {
-                    var isCached = await torrents.IsProviderInstantlyAvailable(torrent);
-                    availabilityByTorrentId[torrent.TorrentId] = isCached;
-                    withAvailability.Add((torrent, isCached));
-                }
-
-                torrentsToAddToProvider = withAvailability.OrderBy(m => m.IsCached == false ? 1 : 0)
-                                                          .ThenBy(m => m.IsCached == null ? 1 : 0)
-                                                          .ThenBy(m => m.Torrent.Priority ?? Int32.MaxValue)
-                                                          .ThenBy(m => m.Torrent.Added)
-                                                          .Select(m => m.Torrent)
-                                                          .ToList();
-            }
-
-            var remainingProviderSlots = maxParallelDownloads == 0 ? Int32.MaxValue : Math.Max(maxParallelDownloads - downloadingTorrentsCount, 0);
-
-            foreach (var torrent in torrentsToAddToProvider)
-            {
-                if (sendNonCachedToQbittorrent)
-                {
-                    if (!availabilityByTorrentId.TryGetValue(torrent.TorrentId, out var isCached))
-                    {
-                        isCached = await torrents.IsProviderInstantlyAvailable(torrent);
-                        availabilityByTorrentId[torrent.TorrentId] = isCached;
-                    }
-
-                    if (isCached == false && await torrents.TryFallbackToQbittorrentOnProviderCacheMiss(torrent))
-                    {
-                        logger.LogInformation("Routed non-cached provider torrent directly to qBittorrent fallback {torrentId}", torrent.TorrentId);
-
-                        continue;
-                    }
-                }
-
-                if (remainingProviderSlots <= 0)
-                {
                     if (sendNonCachedToQbittorrent)
                     {
-                        continue;
+                        if (!availabilityByTorrentId.TryGetValue(torrent.TorrentId, out var isCached))
+                        {
+                            isCached = await torrents.IsProviderInstantlyAvailable(torrent);
+                            availabilityByTorrentId[torrent.TorrentId] = isCached;
+                        }
+
+                        if (isCached == false && await torrents.TryFallbackToQbittorrentOnProviderCacheMiss(torrent))
+                        {
+                            logger.LogInformation("Routed non-cached provider torrent directly to qBittorrent fallback {torrentId}", torrent.TorrentId);
+
+                            continue;
+                        }
                     }
 
-                    break;
-                }
-
-                try
-                {
-                    await torrents.DequeueFromDebridQueue(torrent);
-
-                    if (remainingProviderSlots != Int32.MaxValue)
+                    if (remainingProviderSlots <= 0)
                     {
-                        remainingProviderSlots--;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    var fallbackSucceeded = await torrents.TryFallbackToQbittorrent(torrent, ex);
+                        if (sendNonCachedToQbittorrent)
+                        {
+                            continue;
+                        }
 
-                    if (fallbackSucceeded)
+                        break;
+                    }
+
+                    try
                     {
-                        logger.LogWarning(ex, "Provider add failed, sent torrent {torrentId} to qBittorrent fallback", torrent.TorrentId);
+                        await torrents.DequeueFromDebridQueue(torrent);
 
-                        continue;
+                        if (remainingProviderSlots != Int32.MaxValue)
+                        {
+                            remainingProviderSlots--;
+                        }
                     }
-
-                    await torrents.UpdateComplete(torrent.TorrentId, $"Could not add to provider: {ex.Message}", DateTimeOffset.Now, true);
-
-                    if (ex.Message.Contains("Infringing file", StringComparison.OrdinalIgnoreCase))
+                    catch (RateLimitException ex)
                     {
-                        logger.LogError(ex,
-                                        "Provider add failed with infringing-file response and qBittorrent fallback did not complete for torrent {torrentId}",
-                                        torrent.TorrentId);
-                    }
+                        await SetRateLimit(ex.RetryAfter, ex.Message);
 
-                    logger.LogWarning(ex, "Could not dequeue torrent {torrentId}", torrent.TorrentId);
+                        break;
+                    }
+                    catch (Exception ex)
+                    {
+                        if (await torrents.TryFallbackToQbittorrent(torrent, ex))
+                        {
+                            logger.LogWarning(ex, "Provider add failed, sent torrent {torrentId} to qBittorrent fallback", torrent.TorrentId);
+
+                            continue;
+                        }
+
+                        await torrents.UpdateComplete(torrent.TorrentId, $"Could not add to provider: {ex.Message}", DateTimeOffset.Now, true);
+
+                        if (ex.Message.Contains("Infringing file", StringComparison.OrdinalIgnoreCase))
+                        {
+                            logger.LogError(ex,
+                                            "Provider add failed with infringing-file response and qBittorrent fallback did not complete for torrent {torrentId}",
+                                            torrent.TorrentId);
+                        }
+
+                        logger.LogWarning(ex, "Could not dequeue torrent {torrentId}", torrent.TorrentId);
+                    }
                 }
             }
         }
@@ -503,31 +556,35 @@ public class TorrentRunner(ILogger<TorrentRunner> logger, Torrents torrents, Dow
 
                 // Check if there are any downloads that are queued and can be started.
                 var queuedDownloads = torrent.Downloads
-                                             .Where(m => m.Completed == null && m.DownloadQueued != null && m.DownloadStarted == null && m.Error == null)
+                                             .Where(m => m.Completed == null
+                                                         && m.DownloadQueued != null
+                                                         && m.DownloadQueued <= DateTimeOffset.UtcNow
+                                                         && m.DownloadStarted == null
+                                                         && m.Error == null)
                                              .OrderBy(m => m.DownloadQueued)
                                              .ToList();
 
-                Log($"Currently {queuedDownloads.Count} queued downloads and {ActiveDownloadClients.Count} total active downloads", torrent);
+                Log($"Currently {queuedDownloads.Count} queued downloads and {runnerState.ActiveDownloadClients.Count} total active downloads", torrent);
 
                 foreach (var download in queuedDownloads)
                 {
                     Log($"Processing to download", download, torrent);
 
-                    if (ActiveDownloadClients.Count >= settingDownloadLimit && torrent.DownloadClient != Data.Enums.DownloadClient.Symlink)
+                    if (runnerState.ActiveDownloadClients.Count >= settingDownloadLimit && torrent.DownloadClient != Data.Enums.DownloadClient.Symlink)
                     {
                         Log($"Not starting download because there are already the max number of downloads active", download, torrent);
 
                         return;
                     }
 
-                    if (IsPausedForLowDiskSpace && torrent.DownloadClient == Data.Enums.DownloadClient.Bezzad)
+                    if (runnerState.IsPausedForLowDiskSpace && torrent.DownloadClient == Data.Enums.DownloadClient.Bezzad)
                     {
                         logger.LogInformation($"Not starting Bezzad download because of low disk space {download.ToLog()} {torrent.ToLog()}");
 
                         return;
                     }
 
-                    if (ActiveDownloadClients.ContainsKey(download.DownloadId))
+                    if (runnerState.ActiveDownloadClients.ContainsKey(download.DownloadId))
                     {
                         Log($"Not starting download because this download is already active", download, torrent);
 
@@ -554,10 +611,24 @@ public class TorrentRunner(ILogger<TorrentRunner> logger, Torrents torrents, Dow
                     {
                         logger.LogError(ex, "Cannot unrestrict link: {ex.Message}", ex.Message);
 
-                        await downloads.UpdateError(download.DownloadId, ex.Message);
-                        await downloads.UpdateCompleted(download.DownloadId, DateTimeOffset.UtcNow);
-                        download.Error = ex.Message;
-                        download.Completed = DateTimeOffset.UtcNow;
+                        if (download.RetryCount < torrent.DownloadRetryAttempts)
+                        {
+                            var retryCount = download.RetryCount + 1;
+                            var retryDelay = GetDownloadLinkRetryDelay(retryCount);
+                            var retryAt = DateTimeOffset.UtcNow.Add(retryDelay);
+
+                            Log($"Retrying download link generation {retryCount}/{torrent.DownloadRetryAttempts} at {retryAt:u}", download, torrent);
+
+                            await downloads.Reset(download.DownloadId, retryAt);
+                            await downloads.UpdateRetryCount(download.DownloadId, retryCount);
+                        }
+                        else
+                        {
+                            await downloads.UpdateError(download.DownloadId, ex.Message);
+                            await downloads.UpdateCompleted(download.DownloadId, DateTimeOffset.UtcNow);
+                            download.Error = ex.Message;
+                            download.Completed = DateTimeOffset.UtcNow;
+                        }
 
                         return;
                     }
@@ -579,7 +650,7 @@ public class TorrentRunner(ILogger<TorrentRunner> logger, Torrents torrents, Dow
                     // Start the download process
                     var downloadClient = new DownloadClient(download, torrent, downloadPath, torrent.Category);
 
-                    if (ActiveDownloadClients.TryAdd(download.DownloadId, downloadClient))
+                    if (runnerState.ActiveDownloadClients.TryAdd(download.DownloadId, downloadClient))
                     {
                         Log($"Starting download", download, torrent);
 
@@ -599,7 +670,7 @@ public class TorrentRunner(ILogger<TorrentRunner> logger, Torrents torrents, Dow
                                 await downloads.UpdateRemoteId(download.DownloadId, remoteId);
                             }
 
-                            if (IsPausedForLowDiskSpace && downloadClient.Type == Data.Enums.DownloadClient.Bezzad)
+                            if (runnerState.IsPausedForLowDiskSpace && downloadClient.Type == Data.Enums.DownloadClient.Bezzad)
                             {
                                 logger.LogInformation($"Pausing new Bezzad download due to low disk space {download.ToLog()} {torrent.ToLog()}");
                                 await downloadClient.Pause();
@@ -608,6 +679,8 @@ public class TorrentRunner(ILogger<TorrentRunner> logger, Torrents torrents, Dow
                         catch (Exception ex)
                         {
                             LogError($"Unable to start download: {ex.Message}", download, torrent);
+
+                            continue;
                         }
 
                         Log($"Started download", download, torrent);
@@ -657,14 +730,14 @@ public class TorrentRunner(ILogger<TorrentRunner> logger, Torrents torrents, Dow
                     }
 
                     // Check if we have reached the download limit, if so queue the download, but don't start it.
-                    if (ActiveUnpackClients.Count >= settingUnpackLimit)
+                    if (runnerState.ActiveUnpackClients.Count >= settingUnpackLimit)
                     {
                         Log($"Not starting unpack because there are already the max number of unpacks active", download, torrent);
 
                         continue;
                     }
 
-                    if (ActiveUnpackClients.ContainsKey(download.DownloadId))
+                    if (runnerState.ActiveUnpackClients.ContainsKey(download.DownloadId))
                     {
                         Log($"Not starting unpack because this download is already active", download, torrent);
 
@@ -686,7 +759,7 @@ public class TorrentRunner(ILogger<TorrentRunner> logger, Torrents torrents, Dow
                     // Start the unpacking process
                     var unpackClient = new UnpackClient(download, downloadPath);
 
-                    if (ActiveUnpackClients.TryAdd(download.DownloadId, unpackClient))
+                    if (runnerState.ActiveUnpackClients.TryAdd(download.DownloadId, unpackClient))
                     {
                         Log($"Starting unpack", download, torrent);
 
@@ -702,9 +775,9 @@ public class TorrentRunner(ILogger<TorrentRunner> logger, Torrents torrents, Dow
                     Log($"Torrent reported an error: {torrent.RdStatusRaw}", torrent);
                     Log($"Torrent retry count {torrent.RetryCount}/{torrent.TorrentRetryAttempts}", torrent);
 
-                    Log($"Received RealDebrid error: {torrent.RdStatusRaw}, not processing further", torrent);
+                    Log($"Received provider error: {torrent.RdStatusRaw}, not processing further", torrent);
 
-                    await torrents.UpdateComplete(torrent.TorrentId, $"Received RealDebrid error: {torrent.RdStatusRaw}.", DateTimeOffset.UtcNow, true);
+                    await torrents.UpdateComplete(torrent.TorrentId, $"Debrid error: {torrent.RdStatusRaw}.", DateTimeOffset.UtcNow, true);
 
                     continue;
                 }
@@ -744,8 +817,8 @@ public class TorrentRunner(ILogger<TorrentRunner> logger, Torrents torrents, Dow
 
                     var completePerc = 0;
 
-                    var totalDownloadBytes = torrent.Downloads.Sum(m => m.BytesTotal);
-                    var totalDoneBytes = torrent.Downloads.Sum(m => m.BytesDone);
+                    var totalDownloadBytes = torrent.Downloads.Sum(m => runnerState.GetStats(m.DownloadId).BytesTotal);
+                    var totalDoneBytes = torrent.Downloads.Sum(m => runnerState.GetStats(m.DownloadId).BytesDone);
 
                     if (totalDownloadBytes > 0)
                     {
@@ -776,7 +849,7 @@ public class TorrentRunner(ILogger<TorrentRunner> logger, Torrents torrents, Dow
             catch (Exception ex)
             {
                 logger.LogError(ex.Message, "Torrent processing result in an unexpected exception: {Message}", ex.Message);
-                await torrents.UpdateComplete(torrent.TorrentId, ex.Message, DateTimeOffset.UtcNow, true);
+                await torrents.UpdateComplete(torrent.TorrentId, $"Runner error: {ex.Message}", DateTimeOffset.UtcNow, true);
             }
         }
 
@@ -786,6 +859,37 @@ public class TorrentRunner(ILogger<TorrentRunner> logger, Torrents torrents, Dow
         {
             Log($"TorrentRunner Tick End (took {sw.ElapsedMilliseconds}ms)");
         }
+    }
+
+    public async Task SetRateLimit(TimeSpan retryAfter, String message)
+    {
+        coordinator.UpdateCooldown("General", retryAfter);
+        var nextDequeueTime = coordinator.GetMaxNextAllowedAt();
+        var now = DateTimeOffset.UtcNow;
+        var secondsRemaining = nextDequeueTime.HasValue ? (nextDequeueTime.Value - now).TotalSeconds : 0;
+
+        Log($"Rate-limit reached, pausing dequeuing for {retryAfter.TotalMinutes} minutes (until {nextDequeueTime}): {message}");
+
+        _lastNextAllowedAt = nextDequeueTime;
+
+        await remoteService.UpdateRateLimitStatus(new()
+        {
+            NextDequeueTime = nextDequeueTime,
+            SecondsRemaining = secondsRemaining
+        });
+    }
+
+    private static TimeSpan GetDownloadLinkRetryDelay(Int32 retryCount)
+    {
+        var seconds = retryCount switch
+        {
+            <= 1 => 15,
+            2 => 30,
+            3 => 60,
+            _ => 120
+        };
+
+        return TimeSpan.FromSeconds(seconds);
     }
 
     private void Log(String message, Download? download, Torrent? torrent)

@@ -3,7 +3,7 @@ using Microsoft.AspNetCore.Mvc;
 using RdtClient.Data.Enums;
 using RdtClient.Data.Models.QBittorrent;
 using RdtClient.Service.Services;
-using RealDebridException = RDNET.RealDebridException;
+using Torrent = RdtClient.Data.Models.Data.Torrent;
 
 namespace RdtClient.Web.Controllers;
 
@@ -13,8 +13,20 @@ namespace RdtClient.Web.Controllers;
 /// </summary>
 [ApiController]
 [Route("api/v2")]
-public class QBittorrentController(ILogger<QBittorrentController> logger, QBittorrent qBittorrent) : Controller
+[Route("qbittorrent/api/v2")]
+public class QBittorrentController(ILogger<QBittorrentController> logger, QBittorrent qBittorrent, IHttpClientFactory httpClientFactory, ISettings settings, Torrents torrents)
+    : Controller
 {
+    [AllowAnonymous]
+    [Route("/version/api")]
+    [HttpGet]
+    [HttpPost]
+    public ActionResult LegacyVersionApi()
+    {
+        // Returning 20 nudges older qB clients to use /api/v2 endpoints.
+        return Content("20", "text/plain");
+    }
+
     [AllowAnonymous]
     [Route("auth/login")]
     [HttpGet]
@@ -22,24 +34,24 @@ public class QBittorrentController(ILogger<QBittorrentController> logger, QBitto
     {
         logger.LogDebug($"Auth login");
 
-        if (Settings.Get.General.AuthenticationType == AuthenticationType.None)
+        if (settings.Current.General.AuthenticationType == AuthenticationType.None)
         {
-            return Ok("Ok.");
+            return Content("Ok.", "text/plain");
         }
 
         if (String.IsNullOrWhiteSpace(request.UserName) || String.IsNullOrEmpty(request.Password))
         {
-            return Ok("Fails.");
+            return Content("Fails.", "text/plain");
         }
 
         var result = await qBittorrent.AuthLogin(request.UserName, request.Password);
 
         if (result)
         {
-            return Ok("Ok.");
+            return Content("Ok.", "text/plain");
         }
 
-        return Ok("Fails.");
+        return Content("Fails.", "text/plain");
     }
 
     [AllowAnonymous]
@@ -135,7 +147,7 @@ public class QBittorrentController(ILogger<QBittorrentController> logger, QBitto
     [HttpPost]
     public ActionResult<AppPreferences> AppDefaultSavePath()
     {
-        var result = Settings.AppDefaultSavePath;
+        var result = settings.DefaultSavePath;
 
         return Ok(result);
     }
@@ -143,14 +155,23 @@ public class QBittorrentController(ILogger<QBittorrentController> logger, QBitto
     [Authorize(Policy = "AuthSetting")]
     [Route("torrents/info")]
     [HttpGet]
-    [HttpPost]
     public async Task<ActionResult<IList<TorrentInfo>>> TorrentsInfo([FromQuery] QBTorrentsInfoRequest request)
     {
         var results = await qBittorrent.TorrentInfo();
 
+        results = results.Where(m => MatchesFilter(m, request.Filter)).ToList();
+
         if (!String.IsNullOrWhiteSpace(request.Category))
         {
             results = results.Where(m => m.Category == request.Category).ToList();
+        }
+
+        if (!String.IsNullOrWhiteSpace(request.Hashes))
+        {
+            var hashSet = new HashSet<String>(request.Hashes.Split('|', StringSplitOptions.RemoveEmptyEntries),
+                                              StringComparer.OrdinalIgnoreCase);
+
+            results = results.Where(m => hashSet.Contains(m.Hash)).ToList();
         }
 
         return Ok(results);
@@ -159,9 +180,28 @@ public class QBittorrentController(ILogger<QBittorrentController> logger, QBitto
     [Authorize(Policy = "AuthSetting")]
     [Route("torrents/info")]
     [HttpPost]
-    public async Task<ActionResult<IList<TorrentInfo>>> TorrentsFilesPost([FromForm] QBTorrentsInfoRequest request)
+    public async Task<ActionResult<IList<TorrentInfo>>> TorrentsInfoPost([FromForm] QBTorrentsInfoRequest request)
     {
         return await TorrentsInfo(request);
+    }
+
+    [Authorize(Policy = "AuthSetting")]
+    [Route("torrents/count")]
+    [HttpGet]
+    public async Task<ActionResult<Int32>> TorrentsCount([FromQuery] QBTorrentsCountRequest request)
+    {
+        var results = await qBittorrent.TorrentInfo();
+        results = results.Where(m => MatchesFilter(m, request.Filter)).ToList();
+
+        return results.Count;
+    }
+
+    [Authorize(Policy = "AuthSetting")]
+    [Route("torrents/count")]
+    [HttpPost]
+    public async Task<ActionResult<Int32>> TorrentsCountPost([FromForm] QBTorrentsCountRequest request)
+    {
+        return await TorrentsCount(request);
     }
 
     [Authorize(Policy = "AuthSetting")]
@@ -329,30 +369,28 @@ public class QBittorrentController(ILogger<QBittorrentController> logger, QBitto
 
         foreach (var url in urls)
         {
-            try
+            Torrent? torrent;
+
+            if (url.StartsWith("magnet"))
             {
-                if (url.StartsWith("magnet"))
-                {
-                    await qBittorrent.TorrentsAddMagnet(url.Trim(), request.Category, null);
-                }
-                else if (url.StartsWith("http"))
-                {
-                    var httpClient = new HttpClient();
-                    var result = await httpClient.GetByteArrayAsync(url);
-                    await qBittorrent.TorrentsAddFile(result, request.Category, null);
-                }
-                else
-                {
-                    return BadRequest($"Invalid torrent link format {url}");
-                }
+                torrent = await qBittorrent.TorrentsAddMagnet(url.Trim(), request.Category, null);
             }
-            catch (RealDebridException ex)
+            else if (url.StartsWith("http"))
             {
-                // Infringing file.
-                if (ex.ErrorCode == 35)
-                {
-                    return Ok("Fails.");
-                }
+                var httpClient = httpClientFactory.CreateClient();
+                var result = await httpClient.GetByteArrayAsync(url);
+                torrent = await qBittorrent.TorrentsAddFile(result, request.Category, null);
+            }
+            else
+            {
+                return BadRequest($"Invalid torrent link format {url}");
+            }
+
+            var addResult = await WaitForTorrent(torrent.TorrentId);
+
+            if (!addResult)
+            {
+                return Ok("Fails.");
             }
         }
 
@@ -373,7 +411,14 @@ public class QBittorrentController(ILogger<QBittorrentController> logger, QBitto
                 await file.CopyToAsync(target);
                 var fileBytes = target.ToArray();
 
-                await qBittorrent.TorrentsAddFile(fileBytes, request.Category, request.Priority);
+                var torrent = await qBittorrent.TorrentsAddFile(fileBytes, request.Category, request.Priority);
+
+                var addResult = await WaitForTorrent(torrent.TorrentId);
+
+                if (!addResult)
+                {
+                    return Ok("Fails.");
+                }
             }
         }
 
@@ -388,10 +433,36 @@ public class QBittorrentController(ILogger<QBittorrentController> logger, QBitto
     [Authorize(Policy = "AuthSetting")]
     [Route("torrents/filePrio")]
     [HttpGet]
-    [HttpPost]
-    public ActionResult TorrentsFilePrio()
+    public async Task<ActionResult> TorrentsFilePrio([FromQuery] QBTorrentsFilePrioRequest request)
     {
+        if (String.IsNullOrWhiteSpace(request.Hash) || String.IsNullOrWhiteSpace(request.Id) || request.Priority == null)
+        {
+            return BadRequest();
+        }
+
+        var fileIds = request.Id
+                             .Split('|', StringSplitOptions.RemoveEmptyEntries)
+                             .Select(value => Int32.TryParse(value, out var parsedValue) ? parsedValue : (Int32?)null)
+                             .Where(value => value.HasValue)
+                             .Select(value => value!.Value)
+                             .ToList();
+
+        if (fileIds.Count == 0)
+        {
+            return BadRequest();
+        }
+
+        await qBittorrent.TorrentsFilePrio(request.Hash, fileIds, request.Priority.Value);
+
         return Ok();
+    }
+
+    [Authorize(Policy = "AuthSetting")]
+    [Route("torrents/filePrio")]
+    [HttpPost]
+    public async Task<ActionResult> TorrentsFilePrioPost([FromForm] QBTorrentsFilePrioRequest request)
+    {
+        return await TorrentsFilePrio(request);
     }
 
     [Authorize(Policy = "AuthSetting")]
@@ -548,7 +619,7 @@ public class QBittorrentController(ILogger<QBittorrentController> logger, QBitto
     [HttpGet]
     public ActionResult TransferInfo()
     {
-        return Ok(QBittorrent.TransferInfo());
+        return Ok(qBittorrent.TransferInfo());
     }
 
     [Authorize(Policy = "AuthSetting")]
@@ -557,6 +628,79 @@ public class QBittorrentController(ILogger<QBittorrentController> logger, QBitto
     public ActionResult TransferInfoPost()
     {
         return TransferInfo();
+    }
+
+    [Authorize(Policy = "AuthSetting")]
+    [Route("torrents/trackers")]
+    [HttpGet]
+    public async Task<ActionResult<IList<TorrentInfo>>> TorrentsTrackers([FromQuery] QBTorrentsHashRequest request)
+    {
+        if (String.IsNullOrWhiteSpace(request.Hash))
+        {
+            return BadRequest();
+        }
+
+        var results = await qBittorrent.TorrentsTrackers(request.Hash);
+
+        return Ok(results);
+    }
+
+    [Authorize(Policy = "AuthSetting")]
+    [Route("torrents/trackers")]
+    [HttpPost]
+    public async Task<ActionResult<IList<TorrentInfo>>> TorrentsTrackersPost([FromForm] QBTorrentsHashRequest request)
+    {
+        return await TorrentsTrackers(request);
+    }
+
+    private static Boolean MatchesFilter(TorrentInfo torrent, String? filter)
+    {
+        if (String.IsNullOrWhiteSpace(filter) || filter.Equals("all", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return filter.ToLowerInvariant() switch
+        {
+            "downloading" => torrent.Progress < 1f && !String.Equals(torrent.State, "error", StringComparison.OrdinalIgnoreCase),
+            "completed" => torrent.Progress >= 1f || torrent.CompletionOn.HasValue,
+            "paused" => torrent.State?.StartsWith("paused", StringComparison.OrdinalIgnoreCase) == true,
+            "active" => (torrent.Dlspeed ?? 0) > 0 || (torrent.Upspeed ?? 0) > 0,
+            "inactive" => (torrent.Dlspeed ?? 0) <= 0 && (torrent.Upspeed ?? 0) <= 0,
+            "resumed" => torrent.State?.StartsWith("paused", StringComparison.OrdinalIgnoreCase) != true &&
+                         !String.Equals(torrent.State, "error", StringComparison.OrdinalIgnoreCase),
+            "stalled" => String.Equals(torrent.State, "stalledDL", StringComparison.OrdinalIgnoreCase) ||
+                         String.Equals(torrent.State, "stalledUP", StringComparison.OrdinalIgnoreCase),
+            "stalled_uploading" => String.Equals(torrent.State, "stalledUP", StringComparison.OrdinalIgnoreCase),
+            "stalled_downloading" => String.Equals(torrent.State, "stalledDL", StringComparison.OrdinalIgnoreCase),
+            "errored" => String.Equals(torrent.State, "error", StringComparison.OrdinalIgnoreCase),
+            _ => String.Equals(torrent.State, filter, StringComparison.OrdinalIgnoreCase)
+        };
+    }
+
+    private async Task<Boolean> WaitForTorrent(Guid torrentId)
+    {
+        while (true)
+        {
+            var torrent = await torrents.GetById(torrentId);
+
+            if (torrent == null)
+            {
+                throw new($"Failed to add torrent: Not Found");
+            }
+
+            if (torrent.RdStatus == TorrentStatus.Error || torrent.Error != null)
+            {
+                return false;
+            }
+
+            if (torrent.RdStatus != TorrentStatus.Queued)
+            {
+                return true;
+            }
+
+            await Task.Delay(1000);
+        }
     }
 }
 
@@ -568,12 +712,26 @@ public class QBAuthLoginRequest
 
 public class QBTorrentsInfoRequest
 {
+    public String? Filter { get; set; }
     public String? Category { get; set; }
+    public String? Hashes { get; set; }
+}
+
+public class QBTorrentsCountRequest
+{
+    public String? Filter { get; set; }
 }
 
 public class QBTorrentsHashRequest
 {
     public String? Hash { get; set; }
+}
+
+public class QBTorrentsFilePrioRequest
+{
+    public String? Hash { get; set; }
+    public String? Id { get; set; }
+    public Int32? Priority { get; set; }
 }
 
 public class QBTorrentsDeleteRequest

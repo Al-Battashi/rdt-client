@@ -1,10 +1,10 @@
-import { Component, OnInit } from '@angular/core';
-import { SettingsService } from 'src/app/settings.service';
+import { Component, OnInit, inject } from '@angular/core';
 import { Setting } from '../models/setting.model';
 import { NgClass, KeyValuePipe } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { Nl2BrPipe } from '../nl2br.pipe';
 import { FileSizePipe } from '../filesize.pipe';
+import { SettingsService } from '../settings.service';
 
 @Component({
   selector: 'app-settings',
@@ -14,6 +14,8 @@ import { FileSizePipe } from '../filesize.pipe';
   standalone: true,
 })
 export class SettingsComponent implements OnInit {
+  private settingsService = inject(SettingsService);
+
   public activeTab = 0;
 
   public tabs: Setting[] = [];
@@ -36,8 +38,6 @@ export class SettingsComponent implements OnInit {
   public testQbittorrentFallbackConnectionSuccess: string = null;
 
   public canRegisterMagnetHandler = false;
-
-  constructor(private settingsService: SettingsService) {}
 
   ngOnInit(): void {
     this.reset();

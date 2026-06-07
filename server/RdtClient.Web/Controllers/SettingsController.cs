@@ -3,7 +3,6 @@ using System.Reflection;
 using Aria2NET;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
-using RdtClient.Data.Data;
 using RdtClient.Data.Models.Data;
 using RdtClient.Data.Models.Internal;
 using RdtClient.Service.Helpers;
@@ -15,13 +14,13 @@ namespace RdtClient.Web.Controllers;
 
 [Authorize(Policy = "AuthSetting")]
 [Route("Api/Settings")]
-public class SettingsController(Settings settings, Torrents torrents, QbittorrentFallbackClient qbittorrentFallbackClient) : Controller
+public class SettingsController(ISettings settings, Torrents torrents, QbittorrentFallbackClient qbittorrentFallbackClient) : Controller
 {
     [HttpGet]
     [Route("")]
     public ActionResult Get()
     {
-        var result = SettingData.GetAll();
+        var result = settings.GetAll();
 
         return Ok(result);
     }
@@ -95,7 +94,7 @@ public class SettingsController(Settings settings, Torrents torrents, Qbittorren
     [Route("TestDownloadSpeed")]
     public async Task<ActionResult> TestDownloadSpeed(CancellationToken cancellationToken)
     {
-        var downloadPath = Settings.Get.DownloadClient.DownloadPath;
+        var downloadPath = settings.Current.DownloadClient.DownloadPath;
 
         var testFilePath = Path.Combine(downloadPath, "testDefault.rar");
 
@@ -106,7 +105,7 @@ public class SettingsController(Settings settings, Torrents torrents, Qbittorren
             Link = "https://34.download.real-debrid.com/speedtest/testDefault.rar",
             Torrent = new()
             {
-                DownloadClient = Settings.Get.DownloadClient.Client == DownloadClient.Symlink ? DownloadClient.Bezzad : Settings.Get.DownloadClient.Client,
+                DownloadClient = settings.Current.DownloadClient.Client == DownloadClient.Symlink ? DownloadClient.Bezzad : settings.Current.DownloadClient.Client,
                 RdName = "testDefault.rar"
             }
         };
@@ -131,7 +130,7 @@ public class SettingsController(Settings settings, Torrents torrents, Qbittorren
 
             if (downloadClient.Downloader is Aria2cDownloader aria2Downloader)
             {
-                var aria2NetClient = new Aria2NetClient(Settings.Get.DownloadClient.Aria2cUrl, Settings.Get.DownloadClient.Aria2cSecret, httpClient, 1);
+                var aria2NetClient = new Aria2NetClient(settings.Current.DownloadClient.Aria2cUrl, settings.Current.DownloadClient.Aria2cSecret, httpClient, 1);
 
                 var allDownloads = await aria2NetClient.TellAllAsync(cancellationToken);
 
@@ -155,7 +154,7 @@ public class SettingsController(Settings settings, Torrents torrents, Qbittorren
     [Route("TestWriteSpeed")]
     public async Task<ActionResult> TestWriteSpeed()
     {
-        var downloadPath = Settings.Get.DownloadClient.DownloadPath;
+        var downloadPath = settings.Current.DownloadClient.DownloadPath;
 
         var testFilePath = Path.Combine(downloadPath, "test.tmp");
 

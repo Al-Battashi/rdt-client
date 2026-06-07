@@ -21,9 +21,9 @@ public class Downloads(DownloadData downloadData) : IDownloads
         return await downloadData.Get(torrentId, path);
     }
 
-    public async Task<Download> Add(Guid torrentId, DownloadInfo downloadInfo)
+    public async Task<DownloadAddResult> TryAddForTorrent(Guid torrentId, DownloadInfo downloadInfo)
     {
-        return await downloadData.Add(torrentId, downloadInfo);
+        return await downloadData.TryAddForTorrent(torrentId, downloadInfo);
     }
 
     public async Task UpdateUnrestrictedLink(Guid downloadId, String unrestrictedLink)
@@ -86,8 +86,8 @@ public class Downloads(DownloadData downloadData) : IDownloads
         await downloadData.DeleteForTorrent(torrentId);
     }
 
-    public async Task Reset(Guid downloadId)
+    public async Task Reset(Guid downloadId, DateTimeOffset? downloadQueued = null)
     {
-        await downloadData.Reset(downloadId);
+        await downloadData.Reset(downloadId, downloadQueued);
     }
 }

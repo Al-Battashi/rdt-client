@@ -1,15 +1,18 @@
 using System.Diagnostics;
 using System.IO.Abstractions.TestingHelpers;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 using Moq;
 using RdtClient.Data.Data;
+using RdtClient.Data.Enums;
 using RdtClient.Data.Models.Data;
 using RdtClient.Data.Models.Internal;
 using RdtClient.Service.Services;
 using RdtClient.Service.Wrappers;
+using DownloadClient = RdtClient.Data.Enums.DownloadClient;
 using TorrentsService = RdtClient.Service.Services.Torrents;
 
 namespace RdtClient.Service.Test.Services;
@@ -18,8 +21,6 @@ internal class Mocks
 {
     public readonly Mock<IDownloads> DownloadsMock;
     public readonly Mock<IEnricher> EnricherMock;
-    public readonly Mock<IHttpClientFactory> HttpClientFactoryMock;
-    public readonly IMemoryCache MemoryCache;
     public readonly Mock<IProcessFactory> ProcessFactoryMock;
     public readonly Mock<IProcess> ProcessMock;
     public readonly Mock<ITorrentData> TorrentDataMock;
@@ -30,9 +31,6 @@ internal class Mocks
         TorrentDataMock = new();
         DownloadsMock = new();
         EnricherMock = new();
-        HttpClientFactoryMock = new();
-        HttpClientFactoryMock.Setup(m => m.CreateClient(It.IsAny<String>())).Returns(new HttpClient());
-        MemoryCache = new MemoryCache(new MemoryCacheOptions());
 
         TorrentsLoggerMock = new();
 
@@ -46,6 +44,26 @@ internal class Mocks
 
 public class TorrentsTest
 {
+    private static TorrentsService CreateTorrents(Mocks mocks, MockFileSystem fileSystem)
+    {
+        return new(mocks.TorrentsLoggerMock.Object,
+                   Mock.Of<IHttpClientFactory>(),
+                   new MemoryCache(new MemoryCacheOptions()),
+                   mocks.TorrentDataMock.Object,
+                   mocks.DownloadsMock.Object,
+                   mocks.ProcessFactoryMock.Object,
+                   fileSystem,
+                   mocks.EnricherMock.Object,
+                   null!, // Debrid clients are not used by these tests.
+                   null!,
+                   null!,
+                   null!,
+                   null!,
+                   new TestSettings(),
+                   new TorrentRunnerState(),
+                   new QbittorrentFallbackClient(Mock.Of<ILogger<QbittorrentFallbackClient>>()));
+    }
+
     public static TheoryData<Torrent, List<Download>> TorrentAndDownload()
     {
         var torrent = new Torrent
@@ -93,9 +111,18 @@ public class TorrentsTest
         mocks.TorrentDataMock.Setup(t => t.GetById(torrent.TorrentId)).Returns(Task.FromResult<Torrent?>(torrent));
         mocks.DownloadsMock.Setup(d => d.GetForTorrent(torrent.TorrentId)).ReturnsAsync(downloads);
 
-        var downloadPath = $"{settings.DownloadClient.DownloadPath}/{torrent.Category}";
-        var torrentPath = $"{downloadPath}/{torrent.RdName}";
-        var filePath = $"{torrentPath}/{downloads[0].FileName}";
+        var category = torrent.Category!;
+        var torrentName = torrent.RdName!;
+        var fileName = downloads[0].FileName!;
+
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            settings.DownloadClient.DownloadPath = @"C:\Downloads";
+        }
+
+        var downloadPath = Path.Combine(settings.DownloadClient.DownloadPath, category);
+        var torrentPath = Path.Combine(downloadPath, torrentName);
+        var filePath = Path.Combine(torrentPath, fileName);
 
         var fileSystemMock = new MockFileSystem(new Dictionary<String, MockFileData>
         {
@@ -104,20 +131,7 @@ public class TorrentsTest
             }
         });
 
-        var torrents = new TorrentsService(mocks.TorrentsLoggerMock.Object,
-                                           mocks.HttpClientFactoryMock.Object,
-                                           mocks.MemoryCache,
-                                           mocks.TorrentDataMock.Object,
-                                           mocks.DownloadsMock.Object,
-                                           mocks.ProcessFactoryMock.Object,
-                                           fileSystemMock,
-                                           mocks.EnricherMock.Object,
-                                           null!, // Torrent Clients are not used by `RunTorrentComplete`, this is fine
-                                           null!,
-                                           null!,
-                                           null!,
-                                           null!,
-                                           null!);
+        var torrents = CreateTorrents(mocks, fileSystemMock);
 
         mocks.ProcessMock.Setup(p => p.WaitForExit(It.IsAny<Int32>())).Returns(true);
 
@@ -162,9 +176,9 @@ public class TorrentsTest
         mocks.TorrentDataMock.Setup(t => t.GetById(torrent.TorrentId)).Returns(Task.FromResult<Torrent?>(torrent));
         mocks.DownloadsMock.Setup(d => d.GetForTorrent(torrent.TorrentId)).ReturnsAsync(downloads);
 
-        var downloadPath = $"{settings.DownloadClient.DownloadPath}/{torrent.Category}";
-        var torrentPath = $"{downloadPath}/{torrent.RdName}";
-        var filePath = $"{torrentPath}/{downloads[0].FileName}";
+        var downloadPath = Path.Combine(settings.DownloadClient.DownloadPath, torrent.Category ?? "");
+        var torrentPath = Path.Combine(downloadPath, torrent.RdName ?? "");
+        var filePath = Path.Combine(torrentPath, downloads[0].FileName ?? "");
 
         var fileSystemMock = new MockFileSystem(new Dictionary<String, MockFileData>
         {
@@ -173,20 +187,7 @@ public class TorrentsTest
             }
         });
 
-        var torrents = new TorrentsService(mocks.TorrentsLoggerMock.Object,
-                                           mocks.HttpClientFactoryMock.Object,
-                                           mocks.MemoryCache,
-                                           mocks.TorrentDataMock.Object,
-                                           mocks.DownloadsMock.Object,
-                                           mocks.ProcessFactoryMock.Object,
-                                           fileSystemMock,
-                                           mocks.EnricherMock.Object,
-                                           null!, // Torrent Clients are not used by `RunTorrentComplete`, this is fine
-                                           null!,
-                                           null!,
-                                           null!,
-                                           null!,
-                                           null!);
+        var torrents = CreateTorrents(mocks, fileSystemMock);
 
         //Act
         await torrents.RunTorrentComplete(torrent.TorrentId, settings);
@@ -213,9 +214,9 @@ public class TorrentsTest
         mocks.TorrentDataMock.Setup(t => t.GetById(torrent.TorrentId)).Returns(Task.FromResult<Torrent?>(torrent));
         mocks.DownloadsMock.Setup(d => d.GetForTorrent(torrent.TorrentId)).ReturnsAsync(downloads);
 
-        var downloadPath = $"{settings.DownloadClient.DownloadPath}/{torrent.Category}";
-        var torrentPath = $"{downloadPath}/{torrent.RdName}";
-        var filePath = $"{torrentPath}/{downloads[0].FileName}";
+        var downloadPath = Path.Combine(settings.DownloadClient.DownloadPath, torrent.Category ?? "");
+        var torrentPath = Path.Combine(downloadPath, torrent.RdName ?? "");
+        var filePath = Path.Combine(torrentPath, downloads[0].FileName ?? "");
 
         var fileSystemMock = new MockFileSystem(new Dictionary<String, MockFileData>
         {
@@ -224,20 +225,7 @@ public class TorrentsTest
             }
         });
 
-        var torrents = new TorrentsService(mocks.TorrentsLoggerMock.Object,
-                                           mocks.HttpClientFactoryMock.Object,
-                                           mocks.MemoryCache,
-                                           mocks.TorrentDataMock.Object,
-                                           mocks.DownloadsMock.Object,
-                                           mocks.ProcessFactoryMock.Object,
-                                           fileSystemMock,
-                                           mocks.EnricherMock.Object,
-                                           null!, // Torrent Clients are not used by `RunTorrentComplete`, this is fine
-                                           null!,
-                                           null!,
-                                           null!,
-                                           null!,
-                                           null!);
+        var torrents = CreateTorrents(mocks, fileSystemMock);
 
         mocks.ProcessMock.Setup(p => p.WaitForExit(It.IsAny<Int32>()))
              .Callback(() =>
@@ -283,9 +271,9 @@ public class TorrentsTest
         mocks.TorrentDataMock.Setup(t => t.GetById(torrent.TorrentId)).Returns(Task.FromResult<Torrent?>(torrent));
         mocks.DownloadsMock.Setup(d => d.GetForTorrent(torrent.TorrentId)).ReturnsAsync(downloads);
 
-        var downloadPath = $"{settings.DownloadClient.DownloadPath}/{torrent.Category}";
-        var torrentPath = $"{downloadPath}/{torrent.RdName}";
-        var filePath = $"{torrentPath}/{downloads[0].FileName}";
+        var downloadPath = Path.Combine(settings.DownloadClient.DownloadPath, torrent.Category ?? "");
+        var torrentPath = Path.Combine(downloadPath, torrent.RdName ?? "");
+        var filePath = Path.Combine(torrentPath, downloads[0].FileName ?? "");
 
         var fileSystemMock = new MockFileSystem(new Dictionary<String, MockFileData>
         {
@@ -294,20 +282,7 @@ public class TorrentsTest
             }
         });
 
-        var torrents = new TorrentsService(mocks.TorrentsLoggerMock.Object,
-                                           mocks.HttpClientFactoryMock.Object,
-                                           mocks.MemoryCache,
-                                           mocks.TorrentDataMock.Object,
-                                           mocks.DownloadsMock.Object,
-                                           mocks.ProcessFactoryMock.Object,
-                                           fileSystemMock,
-                                           mocks.EnricherMock.Object,
-                                           null!, // Torrent Clients are not used by `RunTorrentComplete`, this is fine
-                                           null!,
-                                           null!,
-                                           null!,
-                                           null!,
-                                           null!);
+        var torrents = CreateTorrents(mocks, fileSystemMock);
 
         mocks.ProcessMock.Setup(p => p.WaitForExit(It.IsAny<Int32>()))
              .Callback(() =>
@@ -333,5 +308,84 @@ public class TorrentsTest
         Assert.Matches("error-line 1", exitedWithOutputMessage);
         Assert.Matches("error-line 2", exitedWithOutputMessage);
         Assert.Matches("error-line 3", exitedWithOutputMessage);
+    }
+
+    [Fact]
+    public async Task AddNzbFileToDebridQueue_ShouldSetDownloadTypeNzb()
+    {
+        // Arrange
+        var mocks = new Mocks();
+
+        var torrent = new Torrent
+        {
+            TorrentId = Guid.NewGuid()
+        };
+
+        var nzbContent =
+            "<?xml version=\"1.0\" encoding=\"utf-8\" ?>\r\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\r\n <head>\r\n  <meta type=\"title\">Test NZB Title</meta>\r\n </head>\r\n</nzb>";
+
+        var bytes = Encoding.UTF8.GetBytes(nzbContent);
+
+        mocks.TorrentDataMock.Setup(t => t.Add(It.IsAny<String>(),
+                                               It.IsAny<String>(),
+                                               It.IsAny<String>(),
+                                               true,
+                                               DownloadType.Nzb,
+                                               It.IsAny<DownloadClient>(),
+                                               It.IsAny<Torrent>()))
+             .ReturnsAsync(new Torrent());
+
+        var torrents = CreateTorrents(mocks, new MockFileSystem());
+
+        // Act
+        await torrents.AddNzbFileToDebridQueue(bytes, "filename.nzb", torrent);
+
+        // Assert
+        mocks.TorrentDataMock.Verify(t => t.Add(null,
+                                                It.IsAny<String>(),
+                                                It.IsAny<String>(),
+                                                true,
+                                                DownloadType.Nzb,
+                                                It.IsAny<DownloadClient>(),
+                                                It.IsAny<Torrent>()),
+                                     Times.Once);
+    }
+
+    [Fact]
+    public async Task AddNzbLinkToDebridQueue_ShouldSetDownloadTypeNzb()
+    {
+        // Arrange
+        var mocks = new Mocks();
+
+        var torrent = new Torrent
+        {
+            TorrentId = Guid.NewGuid()
+        };
+
+        var link = "http://example.com/test.nzb";
+
+        mocks.TorrentDataMock.Setup(t => t.Add(It.IsAny<String>(),
+                                               It.IsAny<String>(),
+                                               It.IsAny<String>(),
+                                               false,
+                                               DownloadType.Nzb,
+                                               It.IsAny<DownloadClient>(),
+                                               It.IsAny<Torrent>()))
+             .ReturnsAsync(new Torrent());
+
+        var torrents = CreateTorrents(mocks, new MockFileSystem());
+
+        // Act
+        await torrents.AddNzbLinkToDebridQueue(link, torrent);
+
+        // Assert
+        mocks.TorrentDataMock.Verify(t => t.Add(null,
+                                                It.IsAny<String>(),
+                                                link,
+                                                false,
+                                                DownloadType.Nzb,
+                                                It.IsAny<DownloadClient>(),
+                                                It.IsAny<Torrent>()),
+                                     Times.Once);
     }
 }

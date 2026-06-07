@@ -5,6 +5,7 @@ using Microsoft.Extensions.Hosting.WindowsServices;
 using RdtClient.Data.Data;
 using RdtClient.Data.Models.Internal;
 using RdtClient.Service;
+using RdtClient.Service.Helpers;
 using RdtClient.Service.Middleware;
 using RdtClient.Service.Services;
 using Serilog;
@@ -41,6 +42,7 @@ builder.WebHost.ConfigureKestrel(options =>
 if (appSettings.Logging?.File?.Path != null)
 {
     builder.Host.UseSerilog((_, lc) => lc.Enrich.FromLogContext()
+                                         .Enrich.With<CredentialRedactorEnricher>()
                                          .WriteTo.File(appSettings.Logging.File.Path,
                                                        rollOnFileSizeLimit: true,
                                                        fileSizeLimitBytes: appSettings.Logging.File.FileSizeLimitBytes,
@@ -50,7 +52,8 @@ if (appSettings.Logging?.File?.Path != null)
                                          .WriteTo.Console()
                                          .MinimumLevel.ControlledBy(Settings.LoggingLevelSwitch)
                                          .MinimumLevel.Override("Microsoft", LogEventLevel.Warning)
-                                         .MinimumLevel.Override("System.Net.Http", LogEventLevel.Warning));
+                                         .MinimumLevel.Override("System.Net.Http", LogEventLevel.Warning)
+                                         .MinimumLevel.Override("Polly", LogEventLevel.Warning));
 }
 
 SelfLog.Enable(msg =>
@@ -76,6 +79,11 @@ builder.Services.AddAuthorizationBuilder()
                   policyCorrectUser =>
                   {
                       policyCorrectUser.Requirements.Add(new AuthSettingRequirement());
+                  })
+       .AddPolicy("Sabnzbd",
+                  policyCorrectUser =>
+                  {
+                      policyCorrectUser.Requirements.Add(new SabnzbdRequirement());
                   });
 
 builder.Services.AddIdentity<IdentityUser, IdentityRole>(options =>

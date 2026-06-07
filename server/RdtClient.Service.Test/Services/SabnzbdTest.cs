@@ -1,0 +1,475 @@
+using Microsoft.Extensions.Logging;
+using Moq;
+using RdtClient.Data.Enums;
+using RdtClient.Data.Models.Data;
+using RdtClient.Data.Models.Internal;
+using RdtClient.Service.Services;
+
+namespace RdtClient.Service.Test.Services;
+
+public class SabnzbdTest
+{
+    private readonly AppSettings _appSettings = new()
+    {
+        Port = 6500
+    };
+
+    private readonly Mock<ILogger<Sabnzbd>> _loggerMock = new();
+    private readonly TestSettings _settings;
+    private readonly Mock<Torrents> _torrentsMock;
+
+    public SabnzbdTest()
+    {
+        _settings = new();
+        _torrentsMock = new(null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, _settings, new TorrentRunnerState(), new QbittorrentFallbackClient(Mock.Of<ILogger<QbittorrentFallbackClient>>()));
+        _torrentsMock.Setup(t => t.Get()).ReturnsAsync(new List<Torrent>());
+    }
+
+    [Fact]
+    public async Task GetQueue_ShouldReturnCorrectStructure()
+    {
+        // Arrange
+        var torrentList = new List<Torrent>
+        {
+            new()
+            {
+                Hash = "hash1",
+                RdName = "Name 1",
+                RdProgress = 50,
+                Type = DownloadType.Nzb,
+                Downloads = new List<Download>
+                {
+                    new()
+                    {
+                        BytesTotal = 1000,
+                        BytesDone = 500
+                    }
+                }
+            }
+        };
+
+        _torrentsMock.Setup(t => t.Get()).ReturnsAsync(torrentList);
+        _torrentsMock.Setup(t => t.GetDownloadStats(It.IsAny<Guid>())).Returns((0, 1000, 500));
+
+        var sabnzbd = new Sabnzbd(_loggerMock.Object, _torrentsMock.Object, _appSettings, _settings);
+
+        // Act
+        var result = await sabnzbd.GetQueue();
+
+        // Assert
+        Assert.NotNull(result);
+        Assert.Single(result.Slots);
+        Assert.Equal("hash1", result.Slots[0].NzoId);
+        Assert.Equal("Name 1", result.Slots[0].Filename);
+
+        // (50% debrid + 50% download) / 2 = 50%
+        Assert.Equal("50", result.Slots[0].Percentage);
+    }
+
+    [Fact]
+    public async Task GetQueue_ShouldCalculatePercentageCorrectly_WhenDifferentProgress()
+    {
+        // Arrange
+        var torrentList = new List<Torrent>
+        {
+            new()
+            {
+                Hash = "hash1",
+                RdName = "Name 1",
+                RdProgress = 100,
+                Type = DownloadType.Nzb,
+                Downloads = new List<Download>
+                {
+                    new()
+                    {
+                        BytesTotal = 1000,
+                        BytesDone = 0
+                    }
+                }
+            }
+        };
+
+        _torrentsMock.Setup(t => t.Get()).ReturnsAsync(torrentList);
+
+        var sabnzbd = new Sabnzbd(_loggerMock.Object, _torrentsMock.Object, _appSettings, _settings);
+
+        // Act
+        var result = await sabnzbd.GetQueue();
+
+        // Assert
+        // (100% debrid + 0% download) / 2 = 50%
+        Assert.Equal("50", result.Slots[0].Percentage);
+    }
+
+    [Fact]
+    public async Task GetQueue_ShouldCalculateTimeLeftCorrectly()
+    {
+        // Arrange
+        var now = DateTimeOffset.UtcNow;
+        var added = now.AddMinutes(-10);
+
+        var torrentList = new List<Torrent>
+        {
+            new()
+            {
+                Hash = "hash1",
+                RdName = "Name 1",
+                Added = added,
+                RdProgress = 100, // 100% debrid
+                Type = DownloadType.Nzb,
+                Downloads = new List<Download>
+                {
+                    new()
+                    {
+                        BytesTotal = 1000,
+                        BytesDone = 0 // 0% download
+                    }
+                }
+            }
+        };
+
+        // Overall progress = (1.0 + 0.0) / 2 = 0.5
+        // Elapsed = 10 minutes
+        // Total estimated = 10 / 0.5 = 20 minutes
+        // Time left = 20 - 10 = 10 minutes
+
+        _torrentsMock.Setup(t => t.Get()).ReturnsAsync(torrentList);
+
+        var sabnzbd = new Sabnzbd(_loggerMock.Object, _torrentsMock.Object, _appSettings, _settings);
+
+        // Act
+        var result = await sabnzbd.GetQueue();
+
+        // Assert
+        // Allow for some small variation in time calculation during test execution
+        var timeLeftParts = result.Slots[0].TimeLeft.Split(':');
+        var hours = Int32.Parse(timeLeftParts[0]);
+        var minutes = Int32.Parse(timeLeftParts[1]);
+
+        Assert.Equal(0, hours);
+        Assert.InRange(minutes, 9, 11);
+    }
+
+    [Fact]
+    public async Task GetQueue_ShouldCalculateTimeLeftCorrectly_WithRetry()
+    {
+        // Arrange
+        var now = DateTimeOffset.UtcNow;
+        var added = now.AddMinutes(-20);
+        var retry = now.AddMinutes(-10);
+
+        var torrentList = new List<Torrent>
+        {
+            new()
+            {
+                Hash = "hash1",
+                RdName = "Name 1",
+                Added = added,
+                Retry = retry,
+                RdProgress = 100, // 100% debrid
+                Type = DownloadType.Nzb,
+                Downloads = new List<Download>
+                {
+                    new()
+                    {
+                        BytesTotal = 1000,
+                        BytesDone = 0 // 0% download
+                    }
+                }
+            }
+        };
+
+        // Later of Added and Retry is Retry (-10 mins)
+        // Overall progress = (1.0 + 0.0) / 2 = 0.5
+        // Elapsed = 10 minutes
+        // Total estimated = 10 / 0.5 = 20 minutes
+        // Time left = 20 - 10 = 10 minutes
+
+        _torrentsMock.Setup(t => t.Get()).ReturnsAsync(torrentList);
+
+        var sabnzbd = new Sabnzbd(_loggerMock.Object, _torrentsMock.Object, _appSettings, _settings);
+
+        // Act
+        var result = await sabnzbd.GetQueue();
+
+        // Assert
+        var timeLeftParts = result.Slots[0].TimeLeft.Split(':');
+        var hours = Int32.Parse(timeLeftParts[0]);
+        var minutes = Int32.Parse(timeLeftParts[1]);
+
+        Assert.Equal(0, hours);
+        Assert.InRange(minutes, 9, 11);
+    }
+
+    [Fact]
+    public async Task GetQueue_ShouldOnlyReturnNzbs()
+    {
+        // Arrange
+        var torrentList = new List<Torrent>
+        {
+            new()
+            {
+                Hash = "hash1",
+                RdName = "NZB 1",
+                Type = DownloadType.Nzb,
+                Downloads = new List<Download>()
+            },
+            new()
+            {
+                Hash = "hash2",
+                RdName = "Torrent 1",
+                Type = DownloadType.Torrent,
+                Downloads = new List<Download>()
+            }
+        };
+
+        _torrentsMock.Setup(t => t.Get()).ReturnsAsync(torrentList);
+
+        var sabnzbd = new Sabnzbd(_loggerMock.Object, _torrentsMock.Object, _appSettings, _settings);
+
+        // Act
+        var result = await sabnzbd.GetQueue();
+
+        // Assert
+        Assert.Single(result.Slots);
+        Assert.Equal("hash1", result.Slots[0].NzoId);
+    }
+
+    [Fact]
+    public async Task GetHistory_ShouldOnlyReturnNzbs()
+    {
+        // Arrange
+        var torrentList = new List<Torrent>
+        {
+            new()
+            {
+                Hash = "hash1",
+                RdName = "NZB 1",
+                Type = DownloadType.Nzb,
+                Completed = DateTimeOffset.UtcNow,
+                Downloads = new List<Download>()
+            },
+            new()
+            {
+                Hash = "hash2",
+                RdName = "Torrent 1",
+                Type = DownloadType.Torrent,
+                Completed = DateTimeOffset.UtcNow,
+                Downloads = new List<Download>()
+            }
+        };
+
+        _torrentsMock.Setup(t => t.Get()).ReturnsAsync(torrentList);
+
+        var sabnzbd = new Sabnzbd(_loggerMock.Object, _torrentsMock.Object, _appSettings, _settings);
+
+        // Act
+        var result = await sabnzbd.GetHistory();
+
+        // Assert
+        Assert.Single(result.Slots);
+        Assert.Equal("hash1", result.Slots[0].NzoId);
+    }
+
+    [Fact]
+    public async Task GetHistory_ShouldReturnFullPath()
+    {
+        // Arrange
+        var savePath = @"C:\Downloads";
+        _settings.Current.DownloadClient.MappedPath = savePath;
+
+        var torrentList = new List<Torrent>
+        {
+            new()
+            {
+                Hash = "hash1",
+                RdName = "NZB 1",
+                Category = "radarr",
+                Type = DownloadType.Nzb,
+                Completed = DateTimeOffset.UtcNow,
+                Downloads = new List<Download>()
+            }
+        };
+
+        _torrentsMock.Setup(t => t.Get()).ReturnsAsync(torrentList);
+
+        var sabnzbd = new Sabnzbd(_loggerMock.Object, _torrentsMock.Object, _appSettings, _settings);
+
+        // Act
+        var result = await sabnzbd.GetHistory();
+
+        // Assert
+        Assert.Single(result.Slots);
+        var expectedPath = Path.Combine(savePath, "radarr", "NZB 1");
+        Assert.Equal(expectedPath, result.Slots[0].Path);
+    }
+
+    [Fact]
+    public async Task GetHistory_ShouldReturnFullPath_NoCategory()
+    {
+        // Arrange
+        var savePath = @"C:\Downloads";
+        _settings.Current.DownloadClient.MappedPath = savePath;
+
+        var torrentList = new List<Torrent>
+        {
+            new()
+            {
+                Hash = "hash1",
+                RdName = "NZB 1",
+                Category = null,
+                Type = DownloadType.Nzb,
+                Completed = DateTimeOffset.UtcNow,
+                Downloads = new List<Download>()
+            }
+        };
+
+        _torrentsMock.Setup(t => t.Get()).ReturnsAsync(torrentList);
+
+        var sabnzbd = new Sabnzbd(_loggerMock.Object, _torrentsMock.Object, _appSettings, _settings);
+
+        // Act
+        var result = await sabnzbd.GetHistory();
+
+        // Assert
+        Assert.Single(result.Slots);
+        var expectedPath = Path.Combine(savePath, "NZB 1");
+        Assert.Equal(expectedPath, result.Slots[0].Path);
+    }
+
+    [Fact]
+    public async Task GetHistory_ShouldReturnFailedStatus_WhenTorrentHasError()
+    {
+        // Arrange
+        var torrentList = new List<Torrent>
+        {
+            new()
+            {
+                Hash = "hash1",
+                RdName = "NZB 1",
+                Type = DownloadType.Nzb,
+                Completed = DateTimeOffset.UtcNow,
+                Error = "Some error occurred",
+                Downloads = new List<Download>()
+            }
+        };
+
+        _torrentsMock.Setup(t => t.Get()).ReturnsAsync(torrentList);
+
+        var sabnzbd = new Sabnzbd(_loggerMock.Object, _torrentsMock.Object, _appSettings, _settings);
+
+        // Act
+        var result = await sabnzbd.GetHistory();
+
+        // Assert
+        Assert.Single(result.Slots);
+        Assert.Equal("Failed", result.Slots[0].Status);
+    }
+
+    [Theory]
+    [InlineData(TorrentFinishedAction.RemoveAllTorrents, true, true, true, true)]
+    [InlineData(TorrentFinishedAction.RemoveAllTorrents, false, true, true, false)]
+    [InlineData(TorrentFinishedAction.RemoveRealDebrid, true, false, true, true)]
+    [InlineData(TorrentFinishedAction.RemoveRealDebrid, false, false, true, false)]
+    [InlineData(TorrentFinishedAction.RemoveClient, true, true, false, true)]
+    [InlineData(TorrentFinishedAction.RemoveClient, false, true, false, false)]
+    public async Task Delete_ShouldRespectFinishedActionAndDeleteFiles(
+        TorrentFinishedAction finishedAction,
+        Boolean deleteFiles,
+        Boolean expectedDeleteData,
+        Boolean expectedDeleteRdTorrent,
+        Boolean expectedDeleteLocalFiles)
+    {
+        // Arrange
+        var torrentId = Guid.NewGuid();
+        _settings.Current.Integrations.Default.FinishedAction = finishedAction;
+
+        _torrentsMock.Setup(t => t.GetByHash("hash1"))
+                     .ReturnsAsync(new Torrent
+                     {
+                         TorrentId = torrentId,
+                         Hash = "hash1",
+                         Type = DownloadType.Nzb
+                     });
+
+        var sabnzbd = new Sabnzbd(_loggerMock.Object, _torrentsMock.Object, _appSettings, _settings);
+
+        // Act
+        await sabnzbd.Delete("hash1", deleteFiles);
+
+        // Assert
+        _torrentsMock.Verify(t => t.Delete(torrentId, expectedDeleteData, expectedDeleteRdTorrent, expectedDeleteLocalFiles), Times.Once);
+    }
+
+    [Fact]
+    public async Task Delete_ShouldNotDelete_WhenFinishedActionIsNone()
+    {
+        // Arrange
+        _settings.Current.Integrations.Default.FinishedAction = TorrentFinishedAction.None;
+
+        _torrentsMock.Setup(t => t.GetByHash("hash1"))
+                     .ReturnsAsync(new Torrent
+                     {
+                         TorrentId = Guid.NewGuid(),
+                         Hash = "hash1",
+                         Type = DownloadType.Nzb
+                     });
+
+        var sabnzbd = new Sabnzbd(_loggerMock.Object, _torrentsMock.Object, _appSettings, _settings);
+
+        // Act
+        await sabnzbd.Delete("hash1", true);
+
+        // Assert
+        _torrentsMock.Verify(t => t.Delete(It.IsAny<Guid>(), It.IsAny<Boolean>(), It.IsAny<Boolean>(), It.IsAny<Boolean>()), Times.Never);
+    }
+
+    [Fact]
+    public void GetConfig_ShouldReturnCorrectConfig()
+    {
+        // Arrange
+        var sabnzbd = new Sabnzbd(_loggerMock.Object, _torrentsMock.Object, _appSettings, _settings);
+
+        // Act
+        var result = sabnzbd.GetConfig();
+
+        // Assert
+        Assert.NotNull(result);
+        Assert.NotNull(result.Misc);
+        Assert.Equal("6500", result.Misc.Port);
+        Assert.NotEmpty(result.Categories);
+        Assert.Contains(result.Categories, c => c.Name == "*");
+    }
+
+    [Fact]
+    public void GetCategories_ShouldOnlyReturnSettingsCategories()
+    {
+        // Arrange
+        var torrentList = new List<Torrent>
+        {
+            new()
+            {
+                Hash = "hash1",
+                Category = "Movie",
+                Type = DownloadType.Nzb,
+                Downloads = new List<Download>()
+            }
+        };
+
+        _torrentsMock.Setup(t => t.Get()).ReturnsAsync(torrentList);
+
+        _settings.Current.General.Categories = "TV, Music, *";
+
+        var sabnzbd = new Sabnzbd(_loggerMock.Object, _torrentsMock.Object, _appSettings, _settings);
+
+        // Act
+        var result = sabnzbd.GetCategories();
+
+        // Assert
+        Assert.Equal("*", result[0]);
+        Assert.Contains("TV", result);
+        Assert.Contains("Music", result);
+        Assert.DoesNotContain("Movie", result);
+        Assert.Equal(3, result.Count);
+    }
+}

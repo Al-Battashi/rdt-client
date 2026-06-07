@@ -1,14 +1,15 @@
-# Real-Debrid Torrent Client
+# Real-Debrid Torrent & Usenet Client
 
-This is a web interface to manage your torrents on Real-Debrid, AllDebrid, Premiumize TorBox or DebridLink. It supports the following features:
+This is a web interface to manage your torrents on Real-Debrid, AllDebrid, Premiumize, TorBox or DebridLink. It supports the following features:
 
 - Add new torrents through magnets or files
+- Add usenet downloads through NZB files (TorBox and Premiumize only)
 - Download all files from Real-Debrid, AllDebrid, Premiumize or TorBox to your local machine automatically
 - Unpack all files when finished downloading
 - Implements a fake qBittorrent API so you can hook up other applications like Sonarr, Radarr or Couchpotato.
 - Built with Angular 21 and .NET 10
 
-**You will need a Premium service at Real-Debrid, AllDebrid, Premiumize or Torbox!**
+**You will need a Premium service at Real-Debrid, AllDebrid, Premiumize, Torbox or DebridLink!**
 
 [Click here to sign up for Real-Debrid.](https://real-debrid.com/?id=1348683)
 
@@ -34,7 +35,7 @@ Instead of running in Docker you can install it as a service in Windows or Linux
 
 ## Windows Service
 
-1. Make sure you have the **ASP.NET Core Runtime 10.0.0** installed: [https://dotnet.microsoft.com/download/dotnet/10.0](https://dotnet.microsoft.com/download/dotnet/10.0)
+1. Make sure you have the **ASP.NET Core Runtime 10.0.0** and the **SDK** installed: [https://dotnet.microsoft.com/download/dotnet/10.0](https://dotnet.microsoft.com/download/dotnet/10.0)
 2. Get the latest zip file from the Releases page and extract it to your host.
 3. Open the `appsettings.json` file and replace the `LogLevel` `Path` to a path on your host.
 4. In `appsettings.json` replace the `Database` `Path` to a path on your host.
@@ -165,7 +166,9 @@ It has the following options:
 
 ### Connecting Sonarr/Radarr
 
-RdtClient emulates the qBittorrent web protocol and allow applications to use those APIs. This way you can use Sonarr and Radarr to download directly from RealDebrid.
+RdtClient emulates the qBittorrent web protocol and allows applications to use those APIs. This way you can use Sonarr and Radarr to download directly from RealDebrid.
+
+#### Torrents
 
 1. Login to Sonarr or Radarr and click `Settings`.
 1. Go to the `Download Client` tab and click the plus to add.
@@ -182,6 +185,24 @@ When downloading files it will append the `category` setting in the Sonarr/Radar
 
 Notice: the progress and ETA reported in Sonarr's Activity tab will not be accurate, but it will report the torrent as completed so it can be processed after it is done downloading.
 
+#### Usenet/NZB
+
+RdtClient also emulates part of the SABnzbd API so Sonarr and Radarr can add NZB downloads. This requires a provider that supports Usenet/NZB downloads, currently TorBox or Premiumize.
+
+1. Login to Sonarr or Radarr and click `Settings`.
+1. Go to the `Download Client` tab and click the plus to add.
+1. Click `SABnzbd` in the list.
+1. Enter the IP or hostname of RdtClient in the `Host` field.
+1. Enter `6500` in the `Port` field.
+1. Enable `Use SSL` only if you access RdtClient through HTTPS.
+1. Leave `URL Base` empty unless RdtClient is configured with a `BasePath`, for example `/rdt`.
+1. If RdtClient authentication is enabled, leave `API Key` empty and enter your RdtClient username and password. If your client only supports an API key, enter `{username}:{password}` in `API Key`.
+1. If RdtClient authentication is disabled, enter any value in `API Key`, for example `rdtclient`, and leave username/password empty.
+1. Set the category to `sonarr` for Sonarr or `radarr` for Radarr.
+1. Hit `Test` and then `Save` if all is well.
+
+When importing completed NZB downloads, Sonarr/Radarr must be able to access the path reported by RdtClient. In Docker setups this may require a Remote Path Mapping from the RdtClient download path to the path mounted inside Sonarr/Radarr.
+
 ### Running within a folder
 
 By default the application runs in the root of your hosted address (i.e. https://rdt.myserver.com/), but if you want to run it as a relative folder (i.e. https://myserver.com/rdt) you will have to change the `BasePath` setting in the `appsettings.json` file. You can set the `BASE_PATH` environment variable for docker enviroments.
@@ -196,6 +217,17 @@ By default the application runs in the root of your hosted address (i.e. https:/
 - .NET 10
 - Visual Studio 2025
 - (optional) Resharper
+
+### Dev Container
+
+The repository includes a dev container under `.devcontainer/` for the split development workflow used by this project.
+
+It installs .NET 10 and Node 22, forwards ports `4200` and `6500`, and persists `/data/db` and `/data/downloads` in named volumes so the local SQLite database, logs, and downloads survive container rebuilds.
+
+1. Open the repository in the dev container.
+1. In one terminal run `dotnet watch run --project server/RdtClient.Web`.
+1. In another terminal run `cd client && npm start`.
+1. Open `http://localhost:4200`. The Angular dev server proxies `/Api` and `/hub` to the backend running on `6500`.
 
 1. Open the client folder project in VS Code and run `npm install`.
 1. To debug run `ng serve`, to build run `ng build -c production`.

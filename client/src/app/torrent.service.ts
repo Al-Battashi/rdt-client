@@ -1,24 +1,26 @@
 import { HttpClient } from '@angular/common/http';
-import { Inject, Injectable } from '@angular/core';
+import { Injectable, inject } from '@angular/core';
 import * as signalR from '@microsoft/signalr';
 import { Observable, Subject } from 'rxjs';
 import { Torrent, TorrentFileAvailability } from './models/torrent.model';
 import { DiskSpaceStatus } from './models/disk-space-status.model';
+import { RateLimitStatus } from './models/rate-limit-status.model';
 import { APP_BASE_HREF } from '@angular/common';
 
 @Injectable({
   providedIn: 'root',
 })
 export class TorrentService {
+  private http = inject(HttpClient);
+  private baseHref = inject(APP_BASE_HREF);
+
   public update$: Subject<Torrent[]> = new Subject();
   public diskSpaceStatus$: Subject<DiskSpaceStatus> = new Subject();
+  public rateLimitStatus$: Subject<RateLimitStatus> = new Subject();
 
   private connection: signalR.HubConnection;
 
-  constructor(
-    private http: HttpClient,
-    @Inject(APP_BASE_HREF) private baseHref: string,
-  ) {
+  constructor() {
     this.connect();
   }
 
@@ -38,6 +40,10 @@ export class TorrentService {
 
     this.connection.on('diskSpaceStatus', (status: any) => {
       this.diskSpaceStatus$.next(status);
+    });
+
+    this.connection.on('rateLimitStatus', (status: any) => {
+      this.rateLimitStatus$.next(status);
     });
 
     this.connection.onreconnected(() => {
@@ -65,6 +71,10 @@ export class TorrentService {
     return this.http.get<DiskSpaceStatus | null>(`${this.baseHref}Api/Torrents/DiskSpaceStatus`);
   }
 
+  public getRateLimitStatus(): Observable<RateLimitStatus | null> {
+    return this.http.get<RateLimitStatus | null>(`${this.baseHref}Api/Torrents/RateLimitStatus`);
+  }
+
   public uploadMagnet(magnetLink: string, torrent: Torrent): Observable<void> {
     return this.http.post<void>(`${this.baseHref}Api/Torrents/UploadMagnet`, {
       magnetLink,
@@ -77,6 +87,20 @@ export class TorrentService {
     formData.append('file', file);
     formData.append('formData', JSON.stringify({ torrent }));
     return this.http.post<void>(`${this.baseHref}Api/Torrents/UploadFile`, formData);
+  }
+
+  public uploadNzbLink(nzbLink: string, torrent: Torrent): Observable<void> {
+    return this.http.post<void>(`${this.baseHref}Api/Torrents/UploadNzbLink`, {
+      nzbLink,
+      torrent,
+    });
+  }
+
+  public uploadNzbFile(file: File, torrent: Torrent): Observable<void> {
+    const formData: FormData = new FormData();
+    formData.append('file', file);
+    formData.append('formData', JSON.stringify({ torrent }));
+    return this.http.post<void>(`${this.baseHref}Api/Torrents/UploadNzbFile`, formData);
   }
 
   public checkFilesMagnet(magnetLink: string): Observable<TorrentFileAvailability[]> {

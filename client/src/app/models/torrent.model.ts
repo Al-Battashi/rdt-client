@@ -28,6 +28,7 @@ export class Torrent {
   public lifetime: number;
 
   public priority: number;
+  public type: DownloadType;
   public error: string;
 
   public rdId: string;
@@ -43,9 +44,12 @@ export class Torrent {
   public rdSpeed: number;
   public rdSeeders: number;
   public rdFiles: string;
+  public statusText?: string;
+  public filesCount?: number;
+  public downloadsCount?: number;
 
-  public files: TorrentFile[];
-  public downloads: Download[];
+  public files?: TorrentFile[];
+  public downloads?: Download[];
 }
 
 export class TorrentFile {
@@ -72,4 +76,9 @@ export enum RealDebridStatus {
   Uploading = 5,
 
   Error = 99,
+}
+
+export enum DownloadType {
+  Torrent = 0,
+  Nzb = 1,
 }
